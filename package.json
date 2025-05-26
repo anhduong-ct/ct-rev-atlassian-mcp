@@ -1,0 +1,41 @@
+{
+  "name": "atlassian-mcp",
+  "version": "1.0.0",
+  "description": "MCP Server for Atlassian integration to manage CPPF → CRE workflow",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node dist/index.js --debug",
+    "dev": "node src/index.js",
+    "build": "mkdir -p dist && cp -r src/* dist/ && chmod 755 dist/index.js",
+    "prepare": "npm run build",
+    "watch": "nodemon --watch src --exec 'npm run build'",
+    "inspector": "npx @modelcontextprotocol/inspector dist/index.js",
+    "debug": "node --inspect-brk dist/index.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "axios": "^1.6.2",
+    "body-parser": "^2.2.0",
+    "cheerio": "1.0.0-rc.12",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^5.1.0",
+    "node-cache": "^5.1.2",
+    "uuid": "^11.1.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "nodemon": "^3.0.2"
+  },
+  "keywords": [
+    "atlassian",
+    "jira",
+    "confluence",
+    "mcp",
+    "workflow"
+  ],
+  "author": "",
+  "license": "MIT"
+}
