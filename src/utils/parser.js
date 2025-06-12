@@ -7,7 +7,8 @@ import * as cheerio from 'cheerio';
  * @returns {string[]} Array of detected platforms
  */
 function detectPlatforms(content) {
-  if (!content) {
+  // Handle non-string inputs
+  if (!content || typeof content !== 'string') {
     return [];
   }
 
@@ -47,7 +48,7 @@ function detectPlatforms(content) {
  * @returns {string[]} Array of extracted requirements
  */
 function extractRequirements(content, role = config.user.role) {
-  if (!content) {
+  if (!content || typeof content !== 'string') {
     return [];
   }
 
@@ -142,7 +143,7 @@ function extractRequirements(content, role = config.user.role) {
  * @returns {number} Estimated complexity as story points
  */
 function estimateComplexity(requirements) {
-  if (!requirements || requirements.length === 0) {
+  if (!requirements || !Array.isArray(requirements) || requirements.length === 0) {
     return 1; // Default minimum complexity
   }
 
@@ -203,7 +204,8 @@ function estimateComplexity(requirements) {
 // Regex patterns for parsing (as constants)
 const TASK_ID_PATTERNS = {
   CPPF: /CPPF-\d+/gi,
-  CRE: /CRE-\d+/gi
+  CRE: /CRE-(?:\d+|\?+)/gi, // Support CRE-??? pattern
+  UNKNOWN_CRE: /\[(?:Web|UI)?\].*?(?=(?:CRE-|$))/ // Match UI/Web tasks without CRE ID
 };
 
 const ASSIGNEE_PATTERNS = {
@@ -246,8 +248,27 @@ function extractTaskId(text, preferCppf = true) {
     return cppfMatches[0];
   }
   
+  // For tasks without a CRE ID (like UI tasks)
+  if (text.includes('[Web]') || text.includes('[UI]') || text.includes('Revamp UI')) {
+    return 'CRE-???';
+  }
+  
   return null;
 }
+
+/**
+ * Define special patterns for extra tasks
+ */
+const SPECIAL_ASSIGNMENTS = [
+  {
+    pattern: /\[(?:Web|UI)\].*?(?:Search|Revamp)/i,
+    engineer: 'AnhD'  
+  },
+  {
+    pattern: /\[Web\]\[Techdebt\].*?payment/i,
+    engineer: 'AnhD'
+  }
+];
 
 /**
  * Extracts assignee information from text
@@ -259,6 +280,13 @@ function extractAssignee(text) {
   
   const assignees = new Set();
   
+  // Check special patterns first
+  for (const special of SPECIAL_ASSIGNMENTS) {
+    if (special.pattern.test(text)) {
+      assignees.add(`Web.${special.engineer}`);
+    }
+  }
+  
   // Extract all different assignee patterns
   const patterns = [
     { regex: /(\w+)PIC(?!\w)/gi, format: (match) => `${match[1]}PIC` },
@@ -269,6 +297,7 @@ function extractAssignee(text) {
     { regex: /(\w+)\s+PIC/gi, format: (match) => `${match[1]} PIC` }
   ];
   
+  // Add normal pattern matches
   for (const pattern of patterns) {
     const matches = [...text.matchAll(pattern.regex)];
     for (const match of matches) {
@@ -1108,4 +1137,4 @@ export {
   estimateComplexity,
   parseSprintFile,
   parseSprintPlanning
-}; 
+};

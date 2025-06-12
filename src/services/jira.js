@@ -1,21 +1,38 @@
 import axios from 'axios';
 import { config } from '../config.js';
+import credentialsManager from './credentialsManager.js';
 
 class JiraService {
   constructor() {
     this.baseUrl = `${config.jira.host}/rest/api/3`;
-    this.auth = {
-      username: config.jira.email,
-      password: config.jira.apiToken
-    };
     this.headers = {
       'Accept': 'application/json',
       'Content-Type': 'application/json'
     };
   }
+  
+  // Get current auth credentials - check at runtime to allow dynamic updates
+  get auth() {
+    return {
+      username: config.jira.email,
+      password: config.jira.apiToken
+    };
+  }
+  
+  // Check if required credentials are available
+  checkCredentials() {
+    if (!config.jira.email || !config.jira.apiToken) {
+      throw new Error(
+        'Jira credentials not configured. Please use the set_credentials tool first.'
+      );
+    }
+  }
 
   async getIssue(issueKey) {
     try {
+      // Check if credentials are available
+      this.checkCredentials();
+      
       const response = await axios({
         method: 'GET',
         url: `${this.baseUrl}/issue/${issueKey}`,
@@ -37,6 +54,18 @@ class JiraService {
 
   async createIssue(issueData) {
     try {
+      // Get the project's metadata to validate the issue creation
+      const projectKey = issueData.fields?.project?.key;
+      if (projectKey) {
+        const metaResponse = await this.getCreateMeta(projectKey);
+        if (metaResponse.success) {
+          console.log('Available fields:', JSON.stringify(metaResponse.data, null, 2));
+        }
+      }
+
+      // Log the request data for debugging
+      console.log('Creating issue with data:', JSON.stringify(issueData, null, 2));
+
       const response = await axios({
         method: 'POST',
         url: `${this.baseUrl}/issue`,
@@ -47,6 +76,32 @@ class JiraService {
       return { success: true, data: response.data };
     } catch (error) {
       console.error('Error creating issue:', error.message);
+      // Log detailed error response for debugging
+      if (error.response?.data) {
+        console.error('Detailed error response:', JSON.stringify(error.response.data, null, 2));
+      }
+      return { 
+        success: false, 
+        error: error.response?.data?.errors || error.response?.data?.errorMessages || error.message 
+      };
+    }
+  }
+
+  async getCreateMeta(projectKey) {
+    try {
+      const response = await axios({
+        method: 'GET',
+        url: `${this.baseUrl}/issue/createmeta`,
+        auth: this.auth,
+        headers: this.headers,
+        params: {
+          projectKeys: projectKey,
+          expand: 'projects.issuetypes.fields'
+        }
+      });
+      return { success: true, data: response.data };
+    } catch (error) {
+      console.error('Error getting create metadata:', error.message);
       return { 
         success: false, 
         error: error.response?.data?.errorMessages || error.message 
@@ -192,6 +247,47 @@ class JiraService {
 
   async createIssueLink(inwardIssueKey, outwardIssueKey, linkType = 'Relates') {
     try {
+      // First verify both issues exist
+      const [inwardResponse, outwardResponse] = await Promise.all([
+        this.getIssue(inwardIssueKey),
+        this.getIssue(outwardIssueKey)
+      ]);
+
+      if (!inwardResponse.success) {
+        console.error(`Inward issue ${inwardIssueKey} not found:`, inwardResponse.error);
+        return inwardResponse;
+      }
+      if (!outwardResponse.success) {
+        console.error(`Outward issue ${outwardIssueKey} not found:`, outwardResponse.error);
+        return outwardResponse;
+      }
+
+      // Get available link types
+      const linkTypesResponse = await this.getIssueLinkTypes();
+      if (linkTypesResponse.success) {
+        const availableTypes = linkTypesResponse.data.issueLinkTypes;
+        console.log('Available link types:', availableTypes.map(t => 
+          `${t.name} (inward: ${t.inward}, outward: ${t.outward})`).join(', '));
+          
+        // Try to find the requested link type, prioritizing exact "Relates" match
+        let matchingType = availableTypes.find(t => t.name === 'Relates');
+        
+        // If no exact "Relates" match, look for case-insensitive variations
+        if (!matchingType) {
+          matchingType = availableTypes.find(t => 
+            t.name.toLowerCase() === linkType.toLowerCase() ||
+            (t.inward.toLowerCase().includes('relates') && t.outward.toLowerCase().includes('relates'))
+          );
+        }
+        
+        if (matchingType) {
+          console.log(`Found matching link type: ${matchingType.name} (inward: ${matchingType.inward}, outward: ${matchingType.outward})`);
+          linkType = matchingType.name;
+        } else {
+          console.log(`No exact match found for "Relates" type, using as-is`);
+        }
+      }
+
       const response = await axios({
         method: 'POST',
         url: `${this.baseUrl}/issueLink`,
@@ -416,6 +512,24 @@ class JiraService {
       };
     }
   }
+
+  async getIssueLinkTypes() {
+    try {
+      const response = await axios({
+        method: 'GET',
+        url: `${this.baseUrl}/issueLinkType`,
+        auth: this.auth,
+        headers: this.headers
+      });
+      return { success: true, data: response.data };
+    } catch (error) {
+      console.error('Error getting issue link types:', error.message);
+      return { 
+        success: false, 
+        error: error.response?.data?.errorMessages || error.message 
+      };
+    }
+  }
 }
 
-export default new JiraService(); 
+export default new JiraService();

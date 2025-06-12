@@ -11,6 +11,13 @@ const rootDir = path.join(__dirname, '..');
 
 // Create config object from environment variables
 const config = {
+  server: {
+    mode: process.env.MCP_SERVER_MODE || 'stdio', // 'stdio' or 'http'
+    http: {
+      port: parseInt(process.env.MCP_HTTP_PORT || '3000', 10),
+      host: process.env.MCP_HTTP_HOST || 'localhost'
+    }
+  },
   jira: {
     host: process.env.JIRA_HOST || 'https://company.atlassian.net',
     email: process.env.JIRA_EMAIL,
@@ -26,7 +33,7 @@ const config = {
   },
   confluence: {
     host: process.env.CONFLUENCE_HOST || process.env.JIRA_HOST || 'https://company.atlassian.net',
-    spaces: (process.env.CONFLUENCE_SPACES || 'PROD,ENG,DESIGN').split(','),
+    spaces: (process.env.CONFLUENCE_SPACES || 'PROD,TD').split(','),
     sprintPlanningSpace: process.env.SPRINT_PLANNING_SPACE || '~629041681a437e007044041e'
   },
   user: {
@@ -66,9 +73,11 @@ function validateConfig() {
     .map(field => field.path);
 
   if (missingFields.length > 0) {
-    console.warn(`Warning: Missing configuration for: ${missingFields.join(', ')}`);
-    console.warn('Some tools may not work properly without proper credentials.');
-    console.warn('Please create a .env file with the required variables.');
+    // console.warn(`Warning: Missing configuration for: ${missingFields.join(', ')}`);
+    // console.warn('Some tools may not work properly without proper credentials.');
+    // console.warn('Please either:');
+    // console.warn('1. Create a .env file with the required variables, or');
+    // console.warn('2. Use the set_credentials tool at runtime to provide your credentials');
     // Don't fail validation in development mode - just warn
     return true;
   }
@@ -79,7 +88,7 @@ function validateConfig() {
 // Auto-detect sprint on startup if enabled
 async function autoDetectSprint() {
   if (!config.sprint.autoDetection) {
-    console.log('Sprint auto-detection is disabled');
+    // console.log('Sprint auto-detection is disabled');
     config.user.currentSprint = 'Auto-detection disabled';
     return config.user.currentSprint;
   }
@@ -88,17 +97,17 @@ async function autoDetectSprint() {
     // Dynamic import to avoid circular dependency
     const { default: sprintDetectionService } = await import('./services/sprintDetection.js');
     
-    console.log('🔍 Auto-detecting current sprint...');
+    // console.log('🔍 Auto-detecting current sprint...');
     const result = await sprintDetectionService.refreshConfig();
     
     if (result.success) {
-      console.log(`✅ Sprint auto-detected: "${result.data.newSprint}"`);
-      if (result.data.detectionMethod) {
-        console.log(`   Detection method: ${result.data.detectionMethod}`);
-      }
+      // console.log(`✅ Sprint auto-detected: "${result.data.newSprint}"`);
+      // if (result.data.detectionMethod) {
+      //   console.log(`   Detection method: ${result.data.detectionMethod}`);
+      // }
       return result.data.newSprint;
     } else {
-      console.warn(`⚠️ Sprint auto-detection failed: ${result.error}`);
+      // console.warn(`⚠️ Sprint auto-detection failed: ${result.error}`);
       
       // Try to get the most recent sprint as fallback
       const contextResult = await sprintDetectionService.getAllSprintInfo();
@@ -109,21 +118,21 @@ async function autoDetectSprint() {
         
         if (recentSprint) {
           config.user.currentSprint = recentSprint.name;
-          console.log(`📅 Using most recent sprint: "${recentSprint.name}"`);
+          // console.log(`📅 Using most recent sprint: "${recentSprint.name}"`);
           return recentSprint.name;
         }
       }
       
       // Fallback to known working sprint
       config.user.currentSprint = 'Revenue 25.20';
-      console.warn(`Using fallback sprint: "${config.user.currentSprint}"`);
+      // console.warn(`Using fallback sprint: "${config.user.currentSprint}"`);
       return config.user.currentSprint;
     }
   } catch (error) {
-    console.warn(`⚠️ Sprint auto-detection error: ${error.message}`);
+    // console.warn(`⚠️ Sprint auto-detection error: ${error.message}`);
     // Fallback to known sprint even on error
     config.user.currentSprint = 'Revenue 25.20';
-    console.warn(`Using error fallback: "${config.user.currentSprint}"`);
+    // console.warn(`Using error fallback: "${config.user.currentSprint}"`);
     return config.user.currentSprint;
   }
 }
@@ -134,7 +143,7 @@ async function getCurrentSprintInfo() {
     const { default: sprintDetectionService } = await import('./services/sprintDetection.js');
     return await sprintDetectionService.getAllSprintInfo();
   } catch (error) {
-    console.error('Error getting sprint info:', error.message);
+    // console.error('Error getting sprint info:', error.message);
     return { 
       success: false, 
       error: error.message 
@@ -150,4 +159,4 @@ function getCurrentSprint() {
   return config.user.currentSprint;
 }
 
-export { config, validateConfig, autoDetectSprint, getCurrentSprintInfo, getCurrentSprint }; 
+export { config, validateConfig, autoDetectSprint, getCurrentSprintInfo, getCurrentSprint };

@@ -101,6 +101,20 @@ export function extractTicketKey(text) {
 }
 
 /**
+ * Extract Figma links from a given text
+ * @param {string} text - The text to search for Figma links
+ * @returns {string[]} An array of found Figma links
+ */
+export function extractFigmaLinks(text) {
+  if (!text || typeof text !== 'string') return [];
+  
+  const figmaLinkRegex = /https:\/\/(?:www\.)?figma\.com\/(file|proto)\/([0-9a-zA-Z]{22,128})(?:\/([^?#]*))?(?:\?.*)?(?:#.*)?/g;
+  const matches = text.match(figmaLinkRegex);
+  
+  return matches ? Array.from(new Set(matches)) : []; // Return unique links
+}
+
+/**
  * Format a response object with enhanced URL information
  * @param {object} responseData - The original response data
  * @param {object} options - Options for URL enhancement
