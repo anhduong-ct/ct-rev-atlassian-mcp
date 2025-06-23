@@ -41,6 +41,7 @@ const getCPPFDetails = {
       // Format the response for better readability
       const cppf = response.data.cppf;
       const confluenceDocs = response.data.confluenceDocs;
+      const figmaLinks = response.data.figmaLinks;
       
       const formattedResponse = {
         key: cppf.key,
@@ -57,7 +58,8 @@ const getCPPFDetails = {
           title: doc.title,
           url: getConfluenceWebUiUrl(doc),
           space: doc.space ? doc.space.name : 'Unknown'
-        }))
+        })),
+        figmaLinks
       };
       
       // Add reference links
@@ -185,7 +187,8 @@ const getCPPFConfluenceDocs = {
       
       const response = await workflowService.getCPPFConfluenceDocs(cppf_id);
       
-      if (!response.success) {
+      if (!response.success || !response.data || !Array.isArray(response.data)) {
+        console.error(`Error fetching Confluence docs for ${cppf_id}:`, response.error || 'No data found');
         return response;
       }
       

@@ -230,7 +230,5 @@ const flagDependencyIssue = {
 };
 
 export default [
-  addProgressComment,
-  generateStatusReport,
-  flagDependencyIssue
+  addProgressComment
 ]; 

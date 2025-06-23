@@ -86,7 +86,11 @@ const getCREDetails = {
         comments: response.data.comments?.slice(-5)?.map(comment => ({
           id: comment.id,
           author: comment.author?.displayName,
-          body: comment.body?.substring(0, 200) + (comment.body?.length > 200 ? '...' : ''),
+          body: comment.body && typeof comment.body === 'string' 
+            ? (comment.body.substring(0, 200) + (comment.body.length > 200 ? '...' : '')) 
+            : comment.body && typeof comment.body === 'object' && comment.body.content
+              ? JSON.stringify(comment.body).substring(0, 200) + '...'
+              : String(comment.body || ''),
           created: comment.created,
           updated: comment.updated
         })) || [],
@@ -192,7 +196,7 @@ const createCREStoryFromCPPF = {
       };
     } catch (error) {
       console.error(`Error creating CRE story from ${cppf_id}:`, error.message);
-      return { success: false, error: error.message };
+      return { success: false, error: error.message ?? error };
     }
   }
 };
@@ -599,7 +603,9 @@ const getTaskHierarchyAndCPPF = {
             summary: response.data.cppf.cppf.fields.summary,
             priority: response.data.cppf.cppf.fields.priority?.name,
             status: response.data.cppf.cppf.fields.status.name,
-            description: response.data.cppf.cppf.fields.description?.substring(0, 500) + '...' // Truncate for readability
+            description: typeof response.data.cppf.cppf.fields.description === 'string'
+              ? (response.data.cppf.cppf.fields.description.substring(0, 500) + '...') 
+              : String(response.data.cppf.cppf.fields.description || '') // Truncate for readability
           },
           confluenceDocs: response.data.cppf.confluenceDocs?.map(doc => ({
             id: doc.id,

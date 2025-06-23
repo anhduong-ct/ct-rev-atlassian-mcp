@@ -87,27 +87,110 @@ class SprintDetectionService {
       const now = Date.now();
       
       // Return cached data if still valid
-      if (!forceRefresh && 
-          this.cachedSprintContext && 
-          this.lastCacheUpdate && 
-          (now - this.lastCacheUpdate) < this.cacheExpiry) {
-        return { success: true, data: this.cachedSprintContext };
-      }
+      // if (!forceRefresh && 
+      //     this.cachedSprintContext && 
+      //     this.lastCacheUpdate && 
+      //     (now - this.lastCacheUpdate) < this.cacheExpiry) {
+      //   return { success: true, data: this.cachedSprintContext };
+      // }
 
-      // Fetch fresh sprint data
-      const response = await jiraService.getSprintContext();
+      // Don't use jiraService.getSprintContext() anymore as it returns wrong sprint names
+      // Instead, use alternative methods to get the correct current sprint
+      console.log('🔄 Getting current sprint using alternative methods (not using jiraService.getSprintContext)...');
       
-      if (response.success) {
-        this.cachedSprintContext = response.data;
-        this.lastCacheUpdate = now;
-        
-        // Update config with current sprint if available
-        if (response.data.current) {
-          config.user.currentSprint = response.data.current.name;
+      let currentSprint = null;
+      let boardInfo = null;
+      let allSprints = [];
+      
+      // Try to get current sprint from board 260 first
+      const board260Result = await this.getCurrentSprintFromBoard260();
+      if (board260Result.success) {
+        currentSprint = {
+          id: board260Result.data.id,
+          name: board260Result.data.name,
+          state: board260Result.data.state,
+          startDate: board260Result.data.startDate,
+          endDate: board260Result.data.endDate,
+          goal: board260Result.data.goal
+        };
+        boardInfo = { id: board260Result.data.boardId, name: 'CRE Board' };
+        console.log(`✅ Got current sprint from board 260: "${currentSprint.name}"`);
+      } else {
+        // Fallback to issues-based detection
+        console.log('⚠️ Board 260 method failed, trying issues-based detection...');
+        const issuesResult = await this.getCurrentSprintFromIssues();
+        if (issuesResult.success) {
+          currentSprint = {
+            name: issuesResult.data.name,
+            state: 'active', // Assume active if found from recent issues
+            detectionMethod: issuesResult.data.detectionMethod
+          };
+          console.log(`✅ Got current sprint from issues analysis: "${currentSprint.name}"`);
+        } else {
+          console.log('❌ All alternative methods failed');
+          return {
+            success: false,
+            error: 'Could not determine current sprint using alternative methods'
+          };
         }
       }
 
-      return response;
+      if (!currentSprint) {
+        return {
+          success: false,
+          error: 'No current sprint found using alternative methods'
+        };
+      }
+
+      console.log('currentSprintName', currentSprint.name);
+      
+      // Now calculate previous and next sprints using the correct current sprint name
+      const currentSprintName = currentSprint.name;
+      let previousSprint = null;
+      let nextSprint = null;
+      
+      // Calculate previous sprint
+      const calculatedPreviousName = this.calculateSprintName(currentSprintName, 'previous');
+      if (calculatedPreviousName) {
+        previousSprint = {
+          name: calculatedPreviousName,
+          state: 'closed',
+          calculatedSprint: true
+        };
+        console.log(`🔧 Calculated previous sprint: "${calculatedPreviousName}"`);
+      }
+      
+      // Calculate next sprint
+      const calculatedNextName = this.calculateSprintName(currentSprintName, 'next');
+      if (calculatedNextName) {
+        nextSprint = {
+          name: calculatedNextName,
+          state: 'future',
+          calculatedSprint: true
+        };
+        console.log(`🔧 Calculated next sprint: "${calculatedNextName}"`);
+      }
+
+      const data = {
+        current: currentSprint,
+        previous: previousSprint,
+        next: nextSprint,
+        board: boardInfo || { id: this.targetBoardId, name: 'CRE Board' },
+        allSprints: allSprints
+      };
+      
+      this.cachedSprintContext = data;
+      this.lastCacheUpdate = now;
+      
+      // Update config with current sprint
+      if (currentSprint) {
+        config.user.currentSprint = currentSprint.name;
+      }
+
+      return {
+        success: true,
+        data: data
+      };
     } catch (error) {
       console.error('Error getting sprint context:', error.message);
       return { 
@@ -305,6 +388,44 @@ class SprintDetectionService {
     }
   }
 
+  /**
+   * Calculate previous/next sprint names based on even number rule
+   * Current: 25.24 -> Previous: 25.22, Next: 25.26
+   */
+  calculateSprintName(currentSprintName, direction) {
+    try {
+      // Extract pattern like "Revenue 25.24" or "25.24"
+      const match = currentSprintName.match(/(\d+)\.(\d+)/);
+      if (!match) {
+        return null;
+      }
+      
+      const [, majorVersion, minorVersion] = match;
+      const currentMinor = parseInt(minorVersion, 10);
+      
+      let newMinor;
+      if (direction === 'previous') {
+        newMinor = currentMinor - 2; // 24 -> 22
+      } else if (direction === 'next') {
+        newMinor = currentMinor + 2; // 24 -> 26
+      } else {
+        return null;
+      }
+      
+      // Ensure we don't go below 0
+      if (newMinor < 0) {
+        return null;
+      }
+      
+      // Reconstruct the sprint name
+      const newSprintName = currentSprintName.replace(/(\d+)\.(\d+)/, `${majorVersion}.${newMinor.toString().padStart(2, '0')}`);
+      return newSprintName;
+    } catch (error) {
+      console.error('Error calculating sprint name:', error.message);
+      return null;
+    }
+  }
+
   async getPreviousSprint() {
     try {
       const context = await this.getSprintContext();
@@ -313,7 +434,28 @@ class SprintDetectionService {
         return context;
       }
 
-      const previousSprint = context.data.previous;
+      let previousSprint = context.data.previous;
+
+      console.log('previousSprint', previousSprint);
+      
+      // If Jira API doesn't provide previous sprint, calculate it based on current sprint name
+      if (!previousSprint && context.data.current) {
+        const calculatedName = this.calculateSprintName(context.data.current.name, 'previous');
+        if (calculatedName) {
+          // Try to find this sprint in the sprint history
+          const matchingSprint = context.data.allSprints.find(sprint => sprint.name === calculatedName);
+          if (matchingSprint) {
+            previousSprint = matchingSprint;
+          } else {
+            // Create a synthetic sprint object
+            previousSprint = {
+              name: calculatedName,
+              state: 'closed',
+              calculatedSprint: true
+            };
+          }
+        }
+      }
       
       if (!previousSprint) {
         return {
@@ -331,8 +473,9 @@ class SprintDetectionService {
           startDate: previousSprint.startDate,
           endDate: previousSprint.endDate,
           goal: previousSprint.goal,
-          boardId: context.data.board.id,
-          boardName: context.data.board.name
+          boardId: context.data.board?.id,
+          boardName: context.data.board?.name,
+          calculatedSprint: previousSprint.calculatedSprint || false
         }
       };
     } catch (error) {
@@ -352,7 +495,26 @@ class SprintDetectionService {
         return context;
       }
 
-      const nextSprint = context.data.next;
+      let nextSprint = context.data.next;
+      
+      // If Jira API doesn't provide next sprint, calculate it based on current sprint name
+      if (!nextSprint && context.data.current) {
+        const calculatedName = this.calculateSprintName(context.data.current.name, 'next');
+        if (calculatedName) {
+          // Try to find this sprint in the sprint history
+          const matchingSprint = context.data.allSprints.find(sprint => sprint.name === calculatedName);
+          if (matchingSprint) {
+            nextSprint = matchingSprint;
+          } else {
+            // Create a synthetic sprint object
+            nextSprint = {
+              name: calculatedName,
+              state: 'future',
+              calculatedSprint: true
+            };
+          }
+        }
+      }
       
       if (!nextSprint) {
         return {
@@ -370,8 +532,9 @@ class SprintDetectionService {
           startDate: nextSprint.startDate,
           endDate: nextSprint.endDate,
           goal: nextSprint.goal,
-          boardId: context.data.board.id,
-          boardName: context.data.board.name
+          boardId: context.data.board?.id,
+          boardName: context.data.board?.name,
+          calculatedSprint: nextSprint.calculatedSprint || false
         }
       };
     } catch (error) {

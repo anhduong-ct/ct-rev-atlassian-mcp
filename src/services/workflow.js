@@ -3,6 +3,7 @@ import confluenceService from './confluence.js';
 import { config, getCurrentSprint } from '../config.js';
 import { detectPlatforms, extractRequirements, estimateComplexity } from '../utils/parser.js';
 import { calculatePriority } from '../utils/priority.js';
+import { extractFigmaLinks } from '../utils/urls.js';
 
 class WorkflowService {
   async getMySprintAssignments() {
@@ -32,7 +33,8 @@ class WorkflowService {
       success: true,
       data: {
         cppf: cppfResponse.data,
-        confluenceDocs: confluenceDocs.success ? confluenceDocs.data : []
+        confluenceDocs: confluenceDocs.success ? confluenceDocs.data.docs : [],
+        figmaLinks: confluenceDocs.success ? confluenceDocs.data.figmaLinks : []
       }
     };
   }
@@ -45,10 +47,22 @@ class WorkflowService {
     }
 
     const cppfData = cppfResponse.data;
-    const description = cppfData.cppf.fields.description || '';
     
-    // Detect required platforms
-    const detectedPlatforms = detectPlatforms(description);
+    // Use the helper function to safely extract description for requirements analysis
+    const description = this._extractJiraText(cppfData.cppf.fields.description);
+    
+    // Get platforms directly from Jira field (since this is a CPPF)
+    const platformField = cppfData.cppf.fields.customfield_10601;
+    let detectedPlatforms = [];
+    
+    if (platformField && Array.isArray(platformField) && platformField.length > 0) {
+      detectedPlatforms = platformField.map(item => item?.value || item).filter(Boolean);
+    }
+    
+    // Fallback to content parsing if no platform field (shouldn't happen for CPPF)
+    if (detectedPlatforms.length === 0) {
+      detectedPlatforms = detectPlatforms(description, cppfData.cppf);
+    }
     
     // Extract requirements based on role
     const requirements = extractRequirements(description, role);
@@ -88,16 +102,37 @@ class WorkflowService {
       if (!cppfResponse.success) {
         return cppfResponse;
       }
+
+      // Determine which field to use for description and summary
+      const descriptionField = cppfResponse?.data?.fields?.description || cppfResponse?.data?.renderFields?.description;
+      const summaryField = cppfResponse?.data?.fields?.summary || cppfResponse?.data?.renderFields?.summary;
       
-      const description = cppfResponse.data.fields.description || '';
-      const summary = cppfResponse.data.fields.summary || '';
+      // Log the structure of descriptionField before extraction if in debug mode
+      if (process.env.DEBUG || process.env.NODE_ENV === 'development') {
+        console.log('Description field structure:', typeof descriptionField, 
+          descriptionField && typeof descriptionField === 'object' ? `(type: ${descriptionField.type || 'unknown'})` : '');
+      }
       
+      // Use the enhanced helper function to safely extract text from fields
+      const description = this._extractJiraText(descriptionField);
+      const summary = this._extractJiraText(summaryField);
+      
+      // Log just the extracted description, not the full field objects
+      console.log('Extracted description text:', description ? `${description.slice(0, 100)}${description.length > 100 ? '...' : ''}` : 'Empty');
+
       // Extract Confluence page IDs from description (looking for confluence links)
       const confluencePageIds = this._extractConfluencePageIds(description);
+
+      console.log('Extracted Confluence page IDs from CPPF', confluencePageIds);
+      
+      // Extract Figma links from CPPF ticket description and summary
+      let figmaLinks = [];
+      figmaLinks.push(...extractFigmaLinks(description));
+      figmaLinks.push(...extractFigmaLinks(summary));
       
       // Search for related Confluence pages by CPPF ID and summary terms
       const searchTerms = [cppfId, ...summary.split(' ').filter(term => term.length > 3)];
-      const searchQuery = searchTerms.join(' OR ');
+      const searchQuery = searchTerms.join(' ');
       
       const searchResponse = await confluenceService.searchAllSpaces(searchQuery);
       
@@ -105,11 +140,15 @@ class WorkflowService {
       const allDocs = [];
       
       // Add explicitly linked pages
-      if (confluencePageIds.length > 0) {
+      if (confluencePageIds?.length > 0) {
         for (const pageId of confluencePageIds) {
           const pageResponse = await confluenceService.getPage(pageId);
           if (pageResponse.success) {
             allDocs.push(pageResponse.data);
+            // Extract Figma links from explicitly linked Confluence page content
+            if (pageResponse.data.body && pageResponse.data.body.storage && pageResponse.data.body.storage.value) {
+              figmaLinks.push(...extractFigmaLinks(pageResponse.data.body.storage.value));
+            }
           }
         }
       }
@@ -119,11 +158,15 @@ class WorkflowService {
         for (const page of searchResponse.data.results) {
           if (!allDocs.some(doc => doc.id === page.id)) {
             allDocs.push(page);
+            // Extract Figma links from Confluence page content
+            if (page.body && page.body.storage && page.body.storage.value) {
+              figmaLinks.push(...extractFigmaLinks(page.body.storage.value));
+            }
           }
         }
       }
       
-      return { success: true, data: allDocs };
+      return { success: true, data: { docs: allDocs, figmaLinks: Array.from(new Set(figmaLinks)) } };
     } catch (error) {
       console.error(`Error getting Confluence docs for ${cppfId}:`, error.message);
       return { success: false, error: error.message };
@@ -147,41 +190,148 @@ class WorkflowService {
         return analysisResponse;
       }
       
-      // Prepare CRE story data
+      // Get create metadata first to check available fields
+      const metaResponse = await jiraService.getCreateMeta(config.jira.projects.cre);
+      if (!metaResponse.success) {
+        console.error('Failed to get create metadata:', metaResponse.error);
+      } else {
+        console.log('Available issue types:', 
+          JSON.stringify(metaResponse.data.projects[0]?.issuetypes, null, 2));
+      }
+
+      // Get Confluence docs to detect platforms from linked docs
+      const confluenceDocs = await this.getCPPFConfluenceDocs(cppfId);
+      const platformPrefix = await this._determinePlatformPrefix(cppf, confluenceDocs.success ? confluenceDocs.data.docs : []);
+
+      // Start with minimal required fields
       const storyData = {
         fields: {
           project: {
             key: config.jira.projects.cre
           },
-          summary: `[${role.toUpperCase()}] ${cppf.fields.summary}`,
-          description: this._generateCREDescription(cppf, analysisResponse.data),
+          summary: `${platformPrefix} ${cppf.fields.summary}`,
           issuetype: {
             name: 'Story'
           },
-          priority: cppf.fields.priority,
-          // Add custom fields as needed
+          assignee: {
+            accountId: config.user.accountId // Auto-fill assignee
+          }
         }
       };
+
+      // Add optional fields based on what's available in the project
+      try {
+        if (metaResponse.success) {
+          const storyFields = metaResponse.data.projects[0]?.issuetypes
+            ?.find(type => type.name === 'Story')?.fields;
+          
+          if (storyFields) {
+            // Add sprint field if available
+            const sprintField = storyFields[config.jira.customFields.sprint];
+            if (sprintField && config.user.currentSprint) {
+              console.log(`Adding sprint field ${config.jira.customFields.sprint}: ${config.user.currentSprint}`);
+              storyData.fields[config.jira.customFields.sprint] = config.user.currentSprint;
+            } else {
+              console.warn(`Sprint field ${config.jira.customFields.sprint} not available in Story create screen`);
+            }
+
+            // Add Release PIC field
+            const releasePicField = Object.values(storyFields)
+              .find(field => field.name?.toLowerCase().includes('release') && field.name?.toLowerCase().includes('pic'));
+            
+            if (releasePicField) {
+              storyData.fields[releasePicField.key] = {
+                accountId: config.user.accountId
+              };
+            }
+            
+            // Add QA field
+            const qaField = Object.values(storyFields)
+              .find(field => field.name?.toLowerCase().includes('qa'));
+            
+            if (qaField) {
+              storyData.fields[qaField.key] = {
+                emailAddress: 'vuhoang@chotot.vn'
+              };
+            }
+          }
+        } else {
+          console.warn('Could not get create metadata - sprint field will not be set');
+        }
+      } catch (metaError) {
+        console.warn('Could not get create meta for auto-fill fields:', metaError.message);
+      }
+
+      // Add description if we can generate it
+      try {
+        const description = this._generateCREDescription(cppf, analysisResponse.data);
+        if (description) {
+          storyData.fields.description = {
+            type: 'doc',
+            version: 1,
+            content: [
+              {
+                type: 'paragraph',
+                content: [
+                  {
+                    type: 'text',
+                    text: description
+                  }
+                ]
+              }
+            ]
+          };
+        }
+      } catch (error) {
+        console.error('Error generating description:', error);
+      }
+
+      // Log the story data before creation
+      console.log('Creating story with data:', JSON.stringify(storyData, null, 2));
+      
+      // Log the prepared data
+      console.log('Preparing CRE story data:', JSON.stringify(storyData, null, 2));
       
       // Create the CRE story
       const createResponse = await jiraService.createIssue(storyData);
       if (!createResponse.success) {
         return createResponse;
       }
+
+      // Get available link types and ensure we use "Relates" type
+      const linkTypesResponse = await jiraService.getIssueLinkTypes();
+      let linkType = 'Relates'; // Default fallback
       
-      // Link the CRE story to the CPPF ticket
+      if (linkTypesResponse.success) {
+        const availableTypes = linkTypesResponse.data.issueLinkTypes;
+        console.log('Available JIRA link types:', 
+          JSON.stringify(availableTypes, null, 2));
+        
+        // Use helper method to find the "Relates" link type
+        linkType = this._findRelatesLinkType(availableTypes);
+        console.log(`Using link type: ${linkType} for CRE-CPPF connection`);
+      }
+      
+      // Link the CRE story to the CPPF ticket using the found link type
+      console.log(`Creating link of type '${linkType}' between CRE story ${createResponse.data.key} and CPPF ${cppfId}`);
       const linkResponse = await jiraService.createIssueLink(
         createResponse.data.key,
         cppfId,
-        'Implements'
+        linkType
       );
       
+      // Log link creation result
+      if (!linkResponse.success) {
+        console.error('Failed to create link:', linkResponse.error);
+      }
+
       // Return the created story data
       return {
         success: true,
         data: {
           creStory: createResponse.data,
-          linkCreated: linkResponse.success
+          linkCreated: linkResponse.success,
+          linkType: linkType
         }
       };
     } catch (error) {
@@ -200,8 +350,22 @@ class WorkflowService {
       
       const story = storyResponse.data;
       
-      // If platforms not specified, try to detect from story
-      const targetPlatforms = platforms || detectPlatforms(story.fields.description) || config.workflow.platforms;
+      // If platforms not specified, try to get from story platform field or detect from description
+      let targetPlatforms = platforms;
+      
+      if (!targetPlatforms) {
+        // First try to get platforms from the platform field (if CRE stories have it)
+        const platformField = story.fields.customfield_10601;
+        if (platformField && Array.isArray(platformField) && platformField.length > 0) {
+          targetPlatforms = platformField.map(item => item?.value || item).filter(Boolean);
+        }
+        
+        // Fallback to content parsing if no platform field
+        if (!targetPlatforms || targetPlatforms.length === 0) {
+          const description = this._extractJiraText(story.fields.description);
+          targetPlatforms = detectPlatforms(description, story) || config.workflow.platforms;
+        }
+      }
       
       const createdTasks = [];
       
@@ -212,22 +376,100 @@ class WorkflowService {
             project: {
               key: config.jira.projects.cre
             },
-            summary: `[${platform.toUpperCase()}] ${story.fields.summary}`,
-            description: `Implementation task for ${platform} platform.\n\nParent Story: ${storyId}`,
+            summary: this._generateTaskSummary(story.fields.summary, platform),
+            description: {
+              type: 'doc',
+              version: 1,
+              content: [
+                {
+                  type: 'paragraph',
+                  content: [
+                    {
+                      type: 'text',
+                      text: `Implementation task for ${platform} platform.\n\nParent Story: ${storyId}`
+                    }
+                  ]
+                }
+              ]
+            },
             issuetype: {
               name: 'Task'
             },
             priority: story.fields.priority,
-            // Link to parent
-            parent: {
-              key: storyId
+            assignee: {
+              accountId: config.user.accountId // Auto-fill assignee
             }
+            // Note: parent field removed - will create issue link instead
           }
         };
         
+        // Add optional fields based on what's available in the project
+        try {
+          const createMeta = await jiraService.getCreateMeta(config.jira.projects.cre);
+          if (createMeta.success) {
+            const taskFields = createMeta.data.projects[0]?.issuetypes
+              ?.find(type => type.name === 'Task')?.fields;
+            
+            if (taskFields) {
+              // Add sprint field if available
+              const sprintField = taskFields[config.jira.customFields.sprint];
+              if (sprintField && config.user.currentSprint) {
+                console.log(`Adding sprint field ${config.jira.customFields.sprint} to task: ${config.user.currentSprint}`);
+                taskData.fields[config.jira.customFields.sprint] = config.user.currentSprint;
+              } else {
+                console.warn(`Sprint field ${config.jira.customFields.sprint} not available in Task create screen`);
+              }
+
+              // Add Engineer field
+              const engineerField = Object.values(taskFields)
+                .find(field => field.name?.toLowerCase().includes('engineer'));
+              
+              if (engineerField) {
+                taskData.fields[engineerField.key] = {
+                  accountId: config.user.accountId
+                };
+              }
+              
+              // Add QA field
+              const qaField = Object.values(taskFields)
+                .find(field => field.name?.toLowerCase().includes('qa'));
+              
+              if (qaField) {
+                taskData.fields[qaField.key] = {
+                  emailAddress: 'vuhoang@chotot.vn'
+                };
+              }
+            }
+          } else {
+            console.warn('Could not get create metadata for tasks - sprint field will not be set');
+          }
+        } catch (metaError) {
+          console.warn('Could not get create meta for auto-fill fields:', metaError.message);
+        }
+        
         const createResponse = await jiraService.createIssue(taskData);
         if (createResponse.success) {
-          createdTasks.push(createResponse.data);
+          const newTask = createResponse.data;
+          createdTasks.push(newTask);
+          
+          // Create issue link between task and story using "is child of"/"is parent of" relationship
+          try {
+            // Create child-parent relationship (task is child of story)
+            const linkResponse = await jiraService.createIssueLink(newTask.key, storyId, 'Parent');
+            
+            if (!linkResponse.success) {
+              // Try alternative naming patterns for parent-child relationships
+              const altResponse = await jiraService.createIssueLink(newTask.key, storyId, 'Parent-Child');
+              
+              if (!altResponse.success) {
+                // Final fallback to "Relates" link
+                await jiraService.createIssueLink(newTask.key, storyId, 'Relates');
+                console.warn(`Used Relates link as fallback for ${newTask.key} -> ${storyId}`);
+              }
+            }
+          } catch (linkError) {
+            console.warn(`Could not create issue link between ${newTask.key} and ${storyId}:`, linkError.message);
+          }
         }
       }
       
@@ -314,36 +556,127 @@ class WorkflowService {
     }
   }
 
-  async updateCRETaskStatus(taskId, status) {
+  async updateCRETaskStatus(taskId, targetStatus) {
     try {
+      // Get current issue details to know the starting point
+      const issueResponse = await jiraService.getIssue(taskId);
+      if (!issueResponse.success) {
+        return issueResponse;
+      }
+      
+      const currentStatus = issueResponse.data.fields.status.name;
+      
+      // Define workflow paths and allowed transitions based on the provided image
+      const workflowPaths = {
+        'NEW': ['FOR DEVELOPMENT', 'DISCUSSION', 'CLOSED'], // Reordered to prioritize direct 'FOR DEVELOPMENT'
+        'DISCUSSION': ['NEW', 'FOR DEVELOPMENT', 'CLOSED'],
+        'FOR DEVELOPMENT': ['NEW', 'DEVELOPING'],
+        'DEVELOPING': ['FOR DEVELOPMENT', 'WAITING FOR REVIEW'],
+        'WAITING FOR REVIEW': ['DEVELOPING', 'ON STAGING'],
+        'ON STAGING': ['DEVELOPING', 'READY TO UAT', 'READY TO PROD'],
+        'READY TO UAT': ['ON STAGING', 'ON UAT'],
+        'ON UAT': ['READY TO PROD', 'CLOSED'],
+        'READY TO PROD': ['ON PRODUCTION', 'CLOSED'],
+        'ON PRODUCTION': ['CLOSED']
+        // CLOSED is a terminal state, no outgoing paths from it in this map
+      };
+
+      // Normalize status names for comparison
+      const normalizeStatus = (s) => s.toUpperCase().replace(/-/g, ' ').trim();
+      const normalizedTarget = normalizeStatus(targetStatus);
+      const normalizedCurrent = normalizeStatus(currentStatus);
+
+      // If already in the target status, no action needed.
+      if (normalizedCurrent === normalizedTarget) {
+        return {
+          success: true,
+          data: {
+            taskId,
+            originalStatus: currentStatus,
+            targetStatus,
+            path: [], // No transitions executed
+            transitionApplied: false,
+            message: "Issue is already in the target status."
+          }
+        };
+      }
+
       // Get available transitions
       const transitionsResponse = await jiraService.getTransitions(taskId);
       if (!transitionsResponse.success) {
         return transitionsResponse;
       }
+
+      // Find valid path to target status
+      const findPath = (start, end, visited = new Set()) => {
+        if (start === end) return [start];
+        // Ensure start status exists in workflowPaths and hasn't been visited in current path search
+        if (!workflowPaths[start] || visited.has(start)) return null;
+        
+        visited.add(start); // Add current node to visited set for this path search
+        for (const nextStatus of workflowPaths[start]) {
+          // Pass a *copy* of the visited set to recursive calls to avoid interference
+          const pathResult = findPath(nextStatus, end, new Set(visited)); 
+          if (pathResult) {
+            // Path found, no need to alter 'visited' of this frame before returning
+            return [start, ...pathResult];
+          }
+        }
+        // No path found through any 'nextStatus' from this 'start' node.
+        // Backtrack: remove 'start' from this frame's visited set.
+        // This is important if this 'visited' set was passed by reference from a caller.
+        visited.delete(start); 
+        return null;
+      };
+
+      const path = findPath(normalizedCurrent, normalizedTarget);
       
-      // Find the transition that matches the requested status
-      const transition = transitionsResponse.data.transitions.find(
-        t => t.name.toLowerCase() === status.toLowerCase()
-      );
-      
-      if (!transition) {
+      if (!path || path.length === 0) {
         return {
           success: false,
-          error: `No transition found for status "${status}". Available transitions: ${transitionsResponse.data.transitions.map(t => t.name).join(', ')}`
+          error: `No valid transition path found from "${currentStatus}" to "${targetStatus}" based on defined workflow paths.`
         };
       }
-      
-      // Perform the transition
-      const updateResponse = await jiraService.transitionIssue(taskId, transition.id);
-      
+
+      // Execute transitions along the path
+      // path[0] is the current status. Transitions start from path[1].
+      let currentIssueStatusForLogging = currentStatus; 
+      for (let i = 1; i < path.length; i++) {
+        const nextStateInPath = path[i];
+        // Find a Jira transition whose TARGET status matches the nextStateInPath
+        const targetTransition = transitionsResponse.data.transitions.find(
+          t => t.to && t.to.name && normalizeStatus(t.to.name) === nextStateInPath
+        );
+
+        if (!targetTransition) {
+          const availableTargets = transitionsResponse.data.transitions
+            .map(t => t.to && t.to.name ? normalizeStatus(t.to.name) : null)
+            .filter(name => name)
+            .join(', ');
+          return {
+            success: false,
+            error: `Required transition to "${nextStateInPath}" not available from "${currentIssueStatusForLogging}". Available Jira transitions lead to: [${availableTargets || 'None'}]`
+          };
+        }
+
+        const updateResponse = await jiraService.transitionIssue(taskId, targetTransition.id);
+        if (!updateResponse.success) {
+          return {
+            success: false,
+            error: `Failed to transition from "${currentIssueStatusForLogging}" to "${nextStateInPath}" (using Jira transition "${targetTransition.name}" to status "${targetTransition.to.name}"): ${updateResponse.error}`
+          };
+        }
+        currentIssueStatusForLogging = nextStateInPath; // Update for logging in the next iteration
+      }
+
       return {
-        success: updateResponse.success,
+        success: true,
         data: {
           taskId,
-          status,
-          transitionApplied: updateResponse.success,
-          commentAdded: false
+          originalStatus: currentStatus,
+          targetStatus,
+          path: path.slice(1), // Exclude current status from the reported path of transitions
+          transitionApplied: true
         }
       };
     } catch (error) {
@@ -760,8 +1093,90 @@ class WorkflowService {
   }
 
   // Helper methods
+  /**
+   * Safely extract text from a Jira field that could be a string or an object with a content property
+   * Handles Atlassian Document Format (ADF) structure used in Jira descriptions
+   * @param {string|object} field - The field to extract text from
+   * @returns {string} - The extracted text, or empty string if not found
+   * @private
+   */
+  _extractJiraText(field) {
+    if (!field) return '';
+    
+    // If field is a string, return it directly
+    if (typeof field === 'string') {
+      return field;
+    } 
+    
+    // Handle objects (including ADF structure)
+    if (typeof field === 'object') {
+      // Handle arrays by recursively extracting text from each element and joining
+      if (Array.isArray(field)) {
+        return field.map(item => this._extractJiraText(item)).join(' ');
+      }
+      
+      // Handle text nodes in ADF
+      if (field.type === 'text' && field.text) {
+        return field.text;
+      }
+      
+      // Handle ADF structures with specific text handling for common node types
+      if (field.type) {
+        const type = field.type.toLowerCase();
+        // Special handling for specific node types
+        if (['paragraph', 'heading', 'bulletList', 'listItem', 'orderedList'].includes(type)) {
+          if (field.content) {
+            return this._extractJiraText(field.content);
+          }
+        }
+      }
+      
+      // General case for objects with content property
+      if (field.content) {
+        if (typeof field.content === 'string') {
+          return field.content;
+        } else if (Array.isArray(field.content)) {
+          return field.content.map(item => this._extractJiraText(item)).join(' ');
+        } else if (typeof field.content === 'object') {
+          return this._extractJiraText(field.content);
+        }
+      }
+      
+      // Handle case where the object might have text property directly
+      if (field.text && typeof field.text === 'string') {
+        return field.text;
+      }
+      
+      // For doc type at the root level (ADF specific)
+      if (field.type === 'doc' && field.version) {
+        return this._extractJiraText(field.content || '');
+      }
+    }
+    
+    return '';
+  }
+  
   _extractConfluencePageIds(text) {
     const pageIds = [];
+    
+    // Return empty array if text is undefined or empty
+    if (!text) {
+      console.log('No text provided to extract Confluence page IDs');
+      return pageIds;
+    }
+    
+    // Use the helper function to extract text if needed
+    text = this._extractJiraText(text);
+    
+    // Log extracted text length for debugging
+    const textLength = text ? text.length : 0;
+    console.log(`Processing text for Confluence page IDs (${textLength} characters)`);
+    
+    // Skip regex processing if text is empty
+    if (!text) {
+      return pageIds;
+    }
+    
     // Look for Confluence page IDs in URLs like /pages/123456 or ?pageId=123456
     const pageIdRegex = /\/pages\/(\d+)|pageId=(\d+)/g;
     let match;
@@ -777,27 +1192,128 @@ class WorkflowService {
   }
 
   _generateCREDescription(cppfIssue, analysis) {
-    const description = `
-h2. CRE Story for ${cppfIssue.key}
+    try {
+      // Create a basic plain text description as fallback
+      let plainText = [
+        `CRE Story for ${cppfIssue.key}`,
+        '',
+        'Summary:',
+        cppfIssue.fields.summary,
+        '',
+        `Requirements for ${analysis.role} role:`,
+        ...(analysis.requirements || []).map(req => `* ${req}`),
+        '',
+        'Platforms:',
+        ...(analysis.detectedPlatforms || []).map(platform => `* ${platform}`),
+        '',
+        'Complexity:',
+        `${analysis.complexity} story points`,
+        '',
+        'Original CPPF:',
+        cppfIssue.key
+      ].join('\n');
 
-h3. Summary
-${cppfIssue.fields.summary}
+      return plainText;
+    } catch (error) {
+      console.error('Error generating CRE description:', error);
+      // Return a minimal description if there's an error
+      return `Story created from CPPF ${cppfIssue.key}`;
+    }    }
 
-h3. Requirements for ${analysis.role} role
-${analysis.requirements.map(req => `* ${req}`).join('\n')}
+  _findRelatesLinkType(availableTypes) {
+    // First look for exact "Relates" name match
+    const exactMatch = availableTypes.find(t => t.name === 'Relates');
+    if (exactMatch) {
+      return exactMatch.name;
+    }
 
-h3. Platforms
-${analysis.detectedPlatforms.map(platform => `* ${platform}`).join('\n')}
+    // Then look for case-insensitive "relates to" variations
+    const relatesMatch = availableTypes.find(t => 
+      t.name.toLowerCase() === 'relates to' ||
+      (t.inward.toLowerCase().includes('relates') && t.outward.toLowerCase().includes('relates'))
+    );
 
-h3. Complexity
-${analysis.complexity} story points
+    return relatesMatch ? relatesMatch.name : 'Relates'; // Default to 'Relates' if not found
+  }
 
-h3. Original CPPF
-[${cppfIssue.key}|${cppfIssue.self}]
-    `;
+  async _determinePlatformPrefix(cppf, confluenceDocs) {
+    try {
+      // Get platforms directly from the platform field
+      const platformField = cppf.fields.customfield_10601;
+      
+      if (platformField && Array.isArray(platformField) && platformField.length > 0) {
+        const platforms = platformField.map(item => item?.value || item).filter(Boolean);
+        
+        if (platforms.length > 0) {
+          // Handle "All Platforms" case
+          if (platforms.some(p => p === 'All Platforms')) {
+            return '[+][FE/BE]';
+          }
+          
+          // Map Jira platform names to prefixes
+          const platformMap = {
+            'Web browser': 'Web',
+            'Mobile browser': 'Web',
+            'Android': 'Android',
+            'iOS': 'iOS',
+            'Internal': 'BE'
+          };
+          
+          const platformAbbrs = platforms
+            .map(p => platformMap[p] || p.toUpperCase())
+            .filter(Boolean);
+          
+          return `[+][${platformAbbrs.join('/')}]`;
+        }
+      }
+      
+      // Fallback if no platform field found
+      return '[+][FE/BE]';
+    } catch (error) {
+      console.error('Error determining platform prefix:', error);
+      return '[+][FE/BE]';
+    }
+  }
+
+  /**
+   * Generate task summary with proper platform prefix
+   * @param {string} storySummary - The original story summary
+   * @param {string} platform - The platform name (web, backend, app, ios)
+   * @returns {string} - The formatted task summary
+   * @private
+   */
+  _generateTaskSummary(storySummary, platform) {
+    // Platform mapping to display names
+    const platformMap = {
+      'web': 'Web',
+      'backend': 'BE', 
+      'app': 'Android',
+      'ios': 'iOS'
+    };
     
-    return description;
+    const platformDisplay = platformMap[platform.toLowerCase()] || platform.toUpperCase();
+    
+    // Check if story already has [+] prefix
+    if (storySummary.startsWith('[+]')) {
+      // Extract everything after the first platform prefix
+      // Pattern: [+][Platform] or [+][Platform1/Platform2] followed by the rest
+      const match = storySummary.match(/^\[\+\]\[([^\]]+)\](.*)$/);
+      if (match) {
+        const restOfSummary = match[2].trim();
+        return `[+][${platformDisplay}]${restOfSummary}`;
+      }
+    }
+    
+    // Check if story has old format [Platform] prefix
+    const oldFormatMatch = storySummary.match(/^\[([^\]]+)\](.*)$/);
+    if (oldFormatMatch) {
+      const restOfSummary = oldFormatMatch[2].trim();
+      return `[+][${platformDisplay}]${restOfSummary}`;
+    }
+    
+    // If no recognizable prefix, add the new format prefix
+    return `[+][${platformDisplay}] ${storySummary}`;
   }
 }
 
-export default new WorkflowService(); 
+export default new WorkflowService();
