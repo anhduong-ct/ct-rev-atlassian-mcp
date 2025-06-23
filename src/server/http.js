@@ -11,11 +11,12 @@ import { config } from '../config.js';
 import authTools from '../tools/auth.js';
 import sprintTools from '../tools/sprint.js';
 import sprintDetectionTools from '../tools/sprintTools.js';
-import confluenceSprintTools from '../tools/confluenceSprint.js';
+import refactoredConfluenceSprintTools from '../tools/refactored/confluenceSprint.js';
 import cppfTools from '../tools/cppf.js';
 import creTools from '../tools/cre.js';
 import intelligenceTools from '../tools/intelligence.js';
 import communicationTools from '../tools/communication.js';
+import debugTools from '../tools/debug.js';
 
 export function createHttpServer(port = 3000) {
   const app = express();
@@ -28,9 +29,10 @@ export function createHttpServer(port = 3000) {
   // Collect all tools
   const allTools = [
     ...authTools,    // Authentication tools should come first for better UX
+    ...debugTools,   // Debug tools for troubleshooting configuration issues
     ...sprintTools,
     ...sprintDetectionTools,
-    ...confluenceSprintTools,
+    ...refactoredConfluenceSprintTools,
     ...cppfTools,
     ...creTools,
     ...intelligenceTools,

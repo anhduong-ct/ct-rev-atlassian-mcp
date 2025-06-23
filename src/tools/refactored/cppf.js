@@ -1,7 +1,58 @@
 import workflowService from '../../services/refactored/workflow.js';
 import { config } from '../../config.js';
 import { getJiraTicketUrl, getConfluenceWebUiUrl, enhanceWithUrls, extractFigmaLinks } from '../../utils/urls.js';
-import { detectPlatforms, extractRequirements, estimateComplexity } from '../../utils/parser.js';
+import { extractRequirements, estimateComplexity } from '../../utils/parser.js';
+
+/**
+ * Helper function to extract text from ADF (Atlassian Document Format)
+ * @param {Object} adf - ADF object
+ * @returns {string} - Extracted text
+ */
+function extractTextFromADF(adf) {
+  if (!adf || typeof adf !== 'object') {
+    return '';
+  }
+  
+  let text = '';
+  
+  // Handle text nodes
+  if (adf.type === 'text' && adf.text) {
+    return adf.text;
+  }
+  
+  // Handle content arrays
+  if (adf.content && Array.isArray(adf.content)) {
+    for (const item of adf.content) {
+      text += extractTextFromADF(item) + ' ';
+    }
+  }
+  
+  // Handle specific node types
+  if (adf.type === 'inlineCard' && adf.attrs && adf.attrs.url) {
+    text += adf.attrs.url + ' ';
+  }
+  
+  return text.trim();
+}
+
+/**
+ * Extract text from a Jira field that could be a string or ADF object
+ * @param {string|object} field - The field to extract text from
+ * @returns {string} - The extracted text
+ */
+function extractJiraText(field) {
+  if (!field) return '';
+  
+  if (typeof field === 'string') {
+    return field;
+  }
+  
+  if (typeof field === 'object') {
+    return extractTextFromADF(field);
+  }
+  
+  return String(field);
+}
 
 /**
  * Analyze CPPF - Consolidated tool that merges get_cppf_details, analyze_cppf_for_role, and get_cppf_confluence_docs
@@ -81,8 +132,34 @@ const analyzeCPPF = {
         content: includeRawContent ? doc.body?.storage?.value : undefined
       }));
       
-      // Extract platforms and requirements based on CPPF description and linked docs
-      let allContent = typeof cppf.fields.description === 'string' ? cppf.fields.description : '';
+      // Get platforms directly from Jira field instead of parsing content
+      const platformField = cppf.fields.customfield_10601;
+      let detectedPlatforms = [];
+      
+      if (platformField && Array.isArray(platformField) && platformField.length > 0) {
+        detectedPlatforms = platformField.map(item => item?.value || item).filter(Boolean);
+      }
+      
+      // Fallback to config platforms if none found
+      if (detectedPlatforms.length === 0) {
+        const defaultPlatforms = {
+          'web': 'Web browser',
+          'backend': 'Internal',
+          'app': 'Android',
+          'ios': 'iOS'
+        };
+        const configPlatforms = config.workflow.platforms || ['web', 'backend', 'app', 'ios'];
+        detectedPlatforms = configPlatforms.map(p => defaultPlatforms[p] || p);
+      }
+      
+      // Extract content for requirements analysis (not platform detection)
+      let allContent = '';
+      
+      // Extract text from ADF description
+      if (cppf.fields.description) {
+        allContent = extractJiraText(cppf.fields.description);
+      }
+      
       let formattedContent = '';
       
       for (const doc of confluenceDocs) {
@@ -91,9 +168,6 @@ const analyzeCPPF = {
           formattedContent += `\n## ${doc.title}\n${doc.body.storage.value}`;
         }
       }
-      
-      // Analyze content for role-specific requirements
-      const detectedPlatforms = detectPlatforms(allContent);
       const roleMatches = detectedPlatforms.includes(role);
       
       // Extract requirements relevant to the specified role
@@ -105,23 +179,68 @@ const analyzeCPPF = {
       // Convert numeric complexity to text label
       const complexityLabel = analyzeCPPF.getComplexityLabel(complexityScore);
       
+      // OPTIMIZED RESPONSE: Separate structured data from raw content
+      // This implements the hybrid approach from the analysis document
+      
       return {
         success: true,
         data: {
-          cppf: formattedResponse,
-          linkedDocuments: formattedDocs,
+          // STRUCTURED METADATA (efficient for LLM)
+          ticket: {
+            key: cppf.key,
+            url: getJiraTicketUrl(cppf.key),
+            summary: cppf.fields.summary,
+            status: cppf.fields.status?.name || 'Unknown',
+            priority: cppf.fields.priority?.name || 'No Priority',
+            assignee: cppf.fields.assignee ? cppf.fields.assignee.displayName : 'Unassigned',
+            reporter: cppf.fields.reporter ? cppf.fields.reporter.displayName : 'Unknown',
+            created: cppf.fields.created,
+            updated: cppf.fields.updated,
+            components: (cppf.fields.components || []).map(comp => comp.name),
+            labels: cppf.fields.labels || [],
+            platforms: detectedPlatforms
+          },
+          
+          // FILTERED LINKED DOCUMENTS (structured metadata only)
+          linkedDocuments: confluenceDocs.map(doc => ({
+            id: doc.id,
+            title: doc.title,
+            url: getConfluenceWebUiUrl(doc.id, doc._links?.webui),
+            lastModified: doc.version?.when || 'Unknown',
+            lastModifiedBy: doc.version?.by?.displayName || 'Unknown',
+            space: doc.space?.name || 'Unknown'
+            // Note: Raw content moved to analysisContent section
+          })),
+          
           figmaLinks: figmaLinks || [],
+          
+          // ANALYSIS RESULTS (structured for LLM efficiency)
           analysis: {
             detectedPlatforms,
             roleRelevant: roleMatches,
             userRole: role,
-            requirements: requirementsByRole,
             complexityScore,
-            complexity: complexityLabel, // Use text label for compatibility
+            complexity: complexityLabel,
             estimatedEffort: analyzeCPPF.getEffortEstimate(complexityLabel),
-            suggestedNextSteps: analyzeCPPF.getSuggestedNextSteps(formattedResponse.status, roleMatches)
+            suggestedNextSteps: analyzeCPPF.getSuggestedNextSteps(formattedResponse.status, roleMatches),
+            requirementsSummary: {
+              total: requirementsByRole.length,
+              platforms: detectedPlatforms,
+              hasDetailedRequirements: requirementsByRole.length > 0
+            }
           },
-          content: includeRawContent ? formattedContent : undefined,
+          
+          // RAW CONTENT FOR LLM ANALYSIS (only when specifically requested)
+          analysisContent: includeRawContent ? {
+            description: cppf.fields.description,
+            confluenceDocs: confluenceDocs.map(doc => ({
+              title: doc.title,
+              content: doc.body?.storage?.value
+            })),
+            combinedContent: formattedContent,
+            requirements: requirementsByRole // Detailed requirements for analysis
+          } : undefined,
+          
           referenceLinks: {
             jiraProject: getJiraTicketUrl(cppf.key).replace(/\/browse\/.*$/, `/projects/${cppf.key.split('-')[0]}`),
             jiraBoard: getJiraTicketUrl(cppf.key).replace(/\/browse\/.*$/, `/secure/RapidBoard.jspa?projectKey=${cppf.key.split('-')[0]}`)
@@ -253,10 +372,10 @@ const getCPPFConfluenceDocs = {
       return {
         success: true,
         data: {
-          cppf: result.data.cppf,
+          cppf: result.data.ticket,
           docs: result.data.linkedDocuments,
           figmaLinks: result.data.figmaLinks,
-          content: result.data.content
+          content: result.data.analysisContent ? result.data.analysisContent.combinedContent : undefined
         }
       };
     } catch (error) {

@@ -1,6 +1,6 @@
 import jiraService from '../jira.js';
 import confluenceService from '../confluence.js';
-import { config, getCurrentSprint } from '../../config.js';
+import { config, getCurrentSprint, getCurrentSprintInfo } from '../../config.js';
 import { detectPlatforms, extractRequirements, estimateComplexity } from '../../utils/parser.js';
 import { calculatePriority } from '../../utils/priority.js';
 import { extractFigmaLinks } from '../../utils/urls.js';
@@ -155,7 +155,7 @@ class WorkflowService {
               creStory = storyResponse.data;
               
               // Find linked CPPF (if it exists)
-              const cppfIssues = await this.getLinkedIssues(creStory.key, 'inward');
+              const cppfIssues = await this.getLinkedIssues(creStory.key, 'both');
               const cppfTicket = cppfIssues.find(i => i.key.startsWith(config.jira.projects.cppf));
               
               if (cppfTicket) {
@@ -212,7 +212,7 @@ class WorkflowService {
         
         // Find linked CPPF (if direction is 'up' or 'both')
         if (direction === 'up' || direction === 'both') {
-          const cppfIssues = await this.getLinkedIssues(story.key, 'inward');
+          const cppfIssues = await this.getLinkedIssues(story.key, 'both');
           const cppfTicket = cppfIssues.find(i => i.key.startsWith(config.jira.projects.cppf));
           
           if (cppfTicket) {
@@ -291,11 +291,27 @@ class WorkflowService {
       return issue.fields.parent.key;
     }
     
-    // Or check issue links for a parent relationship
+    // Check issue links for parent-child relationships
     if (issue.fields?.issuelinks) {
       for (const link of issue.fields.issuelinks) {
-        if (link.type.name === 'Parent' && link.inwardIssue) {
+        // Look for "is child of" relationships
+        if (link.type && link.type.inward === 'is child of' && link.inwardIssue) {
           return link.inwardIssue.key;
+        }
+        // Alternative: look for "parent of" relationships from the other direction
+        if (link.type && link.type.outward === 'is parent of' && link.outwardIssue) {
+          return link.outwardIssue.key;
+        }
+        // Check for generic "Parent" link type
+        if (link.type && link.type.name === 'Parent' && link.inwardIssue) {
+          return link.inwardIssue.key;
+        }
+        // Fallback: look for stories linked with generic relationships
+        const linkedIssue = link.inwardIssue || link.outwardIssue;
+        if (linkedIssue && linkedIssue.fields && linkedIssue.fields.issuetype && 
+            linkedIssue.fields.issuetype.name === 'Story' && 
+            linkedIssue.key.startsWith(config.jira.projects.cre)) {
+          return linkedIssue.key;
         }
       }
     }
@@ -311,7 +327,7 @@ class WorkflowService {
    */
   async getLinkedIssues(issueKey, direction = 'both') {
     try {
-      const response = await jiraService.getIssue(issueKey, ['issuelinks']);
+      const response = await jiraService.getIssue(issueKey);
       
       if (!response.success) {
         return [];
@@ -462,6 +478,86 @@ class WorkflowService {
     }
     
     return pageIds;
+  }
+
+  /**
+   * Get current sprint information - OPTIMIZED for filtered responses
+   */
+  async getCurrentSprintInfo() {
+    try {
+      // Delegate to config.js method
+      return await getCurrentSprintInfo();
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  }
+  
+  /**
+   * Get ticket hierarchy for any ticket - OPTIMIZED VERSION
+   * @param {string} ticketId - The ticket ID to start from
+   * @param {string} direction - The direction to traverse ('up', 'down', 'both')
+   */
+  async getTicketHierarchy(ticketId, direction = 'both') {
+    try {
+      // Use the existing getFullHierarchy method but return it in the expected format
+      const hierarchyResponse = await this.getFullHierarchy(ticketId, direction, false);
+      
+      if (!hierarchyResponse.success) {
+        return hierarchyResponse;
+      }
+      
+      // Get the main ticket details
+      const ticketResponse = await jiraService.getIssue(ticketId);
+      if (!ticketResponse.success) {
+        return ticketResponse;
+      }
+      
+      const ticket = ticketResponse.data;
+      
+      // Build parents and children arrays from hierarchy
+      let parents = [];
+      let children = [];
+      let linkedIssues = [];
+      
+      const hierarchyData = hierarchyResponse.data;
+      const hierarchy = hierarchyData.hierarchy;
+      
+      // Extract parents (CPPF and parent stories)
+      if (hierarchyData.cppf) {
+        parents.push(hierarchyData.cppf);
+      }
+      
+      if (hierarchyData.story) {
+        parents.push(hierarchyData.story);
+      }
+      
+      // Extract children (CRE stories and tasks)
+      if (hierarchyData.tasks && hierarchyData.tasks.length > 0) {
+        children.push(...hierarchyData.tasks);
+      }
+      
+      // Extract sibling tasks as linked issues
+      if (hierarchy.siblingTasks) {
+        for (const sibling of hierarchy.siblingTasks) {
+          const siblingDetails = await jiraService.getIssue(sibling.key);
+          if (siblingDetails.success) {
+            linkedIssues.push(siblingDetails.data);
+          }
+        }
+      }
+      
+      return {
+        success: true,
+        data: {
+          ticket,
+          parents,
+          children,
+          linkedIssues
+        }
+      };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
   }
 }
 

@@ -72,7 +72,7 @@ const getSprintAssignments = {
         };
       }
       
-      // Format the response for better readability
+      // Format the response for better readability - FILTERED for LLM efficiency
       const formattedIssues = response.data.issues.map(issue => ({
         key: issue.key,
         url: getJiraTicketUrl(issue.key),
@@ -258,4 +258,134 @@ const parseSprintAssignmentFile = {
   }
 };
 
-export default [getSprintAssignments, parseSprintAssignmentFile];
+/**
+ * Get essential sprint information - OPTIMIZED for LLM processing
+ * Returns only essential fields instead of full Jira API response
+ */
+const getSprintInfo = {
+  name: 'get_sprint_info',
+  description: 'Get current sprint information (essential fields only)',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      type: {
+        type: 'string',
+        enum: ['current', 'next', 'previous'],
+        description: 'Which sprint to get information for',
+        default: 'current'
+      },
+      includeAssignments: {
+        type: 'boolean',
+        description: 'Whether to include sprint assignments',
+        default: true
+      },
+      assignee: {
+        type: 'string',
+        description: 'Filter assignments by assignee (use "currentUser" for current user, "unassigned" for unassigned tickets, or provide exact username/email)'
+      },
+      status: {
+        type: 'string',
+        description: 'Filter assignments by status (e.g., "In Progress", "Done", etc.)'
+      },
+      platform: {
+        type: 'string',
+        description: 'Filter assignments by platform (e.g., "web", "backend", "app", "ios")'
+      }
+    }
+  },
+  handler: async ({ type = 'current', includeAssignments = true, assignee, status, platform }) => {
+    try {
+      let sprintResponse;
+      
+      // Get sprint information based on type
+      switch (type) {
+        case 'current':
+          sprintResponse = await workflowService.getCurrentSprintInfo();
+          break;
+        case 'previous':
+          // Import sprintDetectionService at the top of the file
+          const sprintDetectionService = await import('../../services/sprintDetection.js').then(m => m.default);
+          sprintResponse = await sprintDetectionService.getPreviousSprint();
+          break;
+        case 'next':
+          // Import sprintDetectionService at the top of the file  
+          const sprintDetectionServiceNext = await import('../../services/sprintDetection.js').then(m => m.default);
+          sprintResponse = await sprintDetectionServiceNext.getNextSprint();
+          break;
+        default:
+          return {
+            success: false,
+            error: `Invalid sprint type: ${type}. Must be 'current', 'previous', or 'next'`
+          };
+      }
+      
+      if (!sprintResponse.success) {
+        return {
+          success: false,
+          error: sprintResponse.error || `Failed to get ${type} sprint information`
+        };
+      }
+      
+      const sprint = sprintResponse.data;
+      
+      // Calculate helpful derived fields
+      const now = new Date();
+      const startDate = sprint.startDate ? new Date(sprint.startDate) : null;
+      const endDate = sprint.endDate ? new Date(sprint.endDate) : null;
+      
+      let daysRemaining = null;
+      if (endDate) {
+        const timeDiff = endDate.getTime() - now.getTime();
+        daysRemaining = Math.ceil(timeDiff / (1000 * 3600 * 24));
+      }
+      
+      // FILTERED sprint data - only essential fields
+      const filteredSprintData = {
+        name: sprint.name,
+        status: sprint.state || sprint.status,
+        startDate: sprint.startDate,
+        endDate: sprint.endDate,
+        goal: sprint.goal || 'No goal set',
+        daysRemaining,
+        type: type,
+        url: sprint.id ? `${config.jira.host}/secure/RapidBoard.jspa?rapidView=${sprint.originBoardId}&sprint=${sprint.id}` : null
+      };
+      
+      const result = {
+        success: true,
+        data: filteredSprintData
+      };
+      
+      // If assignments requested and it's current sprint, get them with filtered data
+      if (includeAssignments && type === 'current') {
+        const assignmentsResponse = await getSprintAssignments.handler({ assignee, status, platform, groupBy: 'none' });
+        
+        if (assignmentsResponse.success) {
+          // Only include essential assignment statistics
+          result.data.assignments = {
+            totalTasks: assignmentsResponse.data.total,
+            completedTasks: assignmentsResponse.data.issues.filter(issue => 
+              ['Done', 'Closed', 'Completed'].includes(issue.status)
+            ).length,
+            inProgressTasks: assignmentsResponse.data.issues.filter(issue => 
+              issue.status === 'In Progress'
+            ).length,
+            // Only include filtered issue data if requested
+            issues: assignmentsResponse.data.issues
+          };
+        }
+      } else if (includeAssignments && type !== 'current') {
+        result.data.assignments = {
+          note: `Assignment data only available for current sprint. This is ${type} sprint data.`
+        };
+      }
+      
+      return result;
+    } catch (error) {
+      console.error('Error getting sprint info:', error.message);
+      return { success: false, error: error.message };
+    }
+  }
+};
+
+export default [getSprintAssignments, parseSprintAssignmentFile, getSprintInfo];

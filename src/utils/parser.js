@@ -2,43 +2,132 @@ import { config } from '../config.js';
 import * as cheerio from 'cheerio';
 
 /**
- * Analyzes text to detect required platforms
+ * Analyzes text to detect required platforms based on Jira platform types
  * @param {string} content - The text content to analyze
+ * @param {Object} jiraTicket - Optional Jira ticket object to check for platform field
  * @returns {string[]} Array of detected platforms
  */
-function detectPlatforms(content) {
+function detectPlatforms(content, jiraTicket = null) {
   // Handle non-string inputs
   if (!content || typeof content !== 'string') {
     return [];
   }
 
-  const platforms = [];
-  const platformKeywords = {
-    web: ['web', 'frontend', 'front-end', 'react', 'angular', 'vue', 'javascript', 'typescript', 'html', 'css'],
-    backend: ['backend', 'back-end', 'api', 'server', 'database', 'db', 'java', 'python', 'node', 'express', 'spring'],
-    app: ['app', 'mobile', 'android', 'kotlin', 'react native', 'flutter'],
-    ios: ['ios', 'swift', 'objective-c', 'apple']
-  };
-
-  // Convert content to lowercase for case-insensitive matching
-  const lowerContent = content.toLowerCase();
-
-  // Check for platform keywords
-  for (const [platform, keywords] of Object.entries(platformKeywords)) {
-    for (const keyword of keywords) {
-      if (lowerContent.includes(keyword)) {
-        platforms.push(platform);
-        break;
+  // Step 1: Check Jira platform field first (customfield_10601)
+  if (jiraTicket?.fields?.customfield_10601) {
+    const platformField = jiraTicket.fields.customfield_10601;
+    
+    if (Array.isArray(platformField) && platformField.length > 0) {
+      // Extract platform values from Jira select field format: [{value: "All Platforms", id: "10551"}]
+      const platforms = platformField
+        .map(item => item?.value || item)
+        .filter(Boolean);
+      
+      if (platforms.length > 0) {
+        return platforms;
       }
     }
   }
 
-  // If no platforms detected, return all configured platforms as fallback
-  if (platforms.length === 0) {
-    return config.workflow.platforms;
+  // Step 2: Extract text from ADF if needed
+  let extractedText = content;
+  if (typeof content === 'string' && content.includes('"type"') && content.includes('"content"')) {
+    try {
+      const adfObj = JSON.parse(content);
+      extractedText = extractTextFromADF(adfObj);
+    } catch (e) {
+      // Not JSON, continue with original content
+    }
   }
 
-  return [...new Set(platforms)]; // Remove duplicates
+  // Step 3: Check for "All Platforms" in content
+  if (extractedText.toLowerCase().includes('all platforms')) {
+    return ['All Platforms'];
+  }
+
+  // Step 4: Analyze content for platform keywords
+  const platformKeywords = {
+    'Web browser': [
+      'web browser', 'web', 'frontend', 'front-end', 'ui', 'user interface',
+      'button', 'click', 'view', 'page', 'browser', 'react', 'angular', 'vue'
+    ],
+    'Mobile browser': [
+      'mobile browser', 'mobile web', 'responsive', 'pwa', 'mobile viewport'
+    ],
+    'Android': [
+      'android', 'kotlin', 'android app', 'play store', 'mobile android'
+    ],
+    'iOS': [
+      'ios', 'swift', 'iphone', 'ipad', 'app store', 'mobile ios'
+    ],
+    'Internal': [
+      'internal tool', 'admin panel', 'backend api', 'internal system', 'cms system'
+    ]
+  };
+
+  const lowerContent = extractedText.toLowerCase();
+  const detectedPlatforms = [];
+
+  for (const [platform, keywords] of Object.entries(platformKeywords)) {
+    if (keywords.some(keyword => lowerContent.includes(keyword))) {
+      detectedPlatforms.push(platform);
+    }
+  }
+
+  // Step 5: Smart defaults for UI-related content
+  if (detectedPlatforms.length === 0) {
+    const uiIndicators = ['button', 'view', 'click', 'display', 'interface', 'page'];
+    if (uiIndicators.some(indicator => lowerContent.includes(indicator))) {
+      return ['Web browser'];
+    }
+  }
+
+  // Step 6: Fallback to configured platforms
+  if (detectedPlatforms.length === 0) {
+    const defaultPlatforms = {
+      'web': 'Web browser',
+      'backend': 'Internal',
+      'app': 'Android',
+      'ios': 'iOS'
+    };
+    
+    const configPlatforms = config.workflow.platforms || ['web', 'backend', 'app', 'ios'];
+    return configPlatforms.map(p => defaultPlatforms[p] || p);
+  }
+
+  return [...new Set(detectedPlatforms)]; // Remove duplicates
+}
+
+/**
+ * Helper function to extract text from ADF (Atlassian Document Format)
+ * @param {Object} adf - ADF object
+ * @returns {string} - Extracted text
+ */
+function extractTextFromADF(adf) {
+  if (!adf || typeof adf !== 'object') {
+    return '';
+  }
+  
+  let text = '';
+  
+  // Handle text nodes
+  if (adf.type === 'text' && adf.text) {
+    return adf.text;
+  }
+  
+  // Handle content arrays
+  if (adf.content && Array.isArray(adf.content)) {
+    for (const item of adf.content) {
+      text += extractTextFromADF(item) + ' ';
+    }
+  }
+  
+  // Handle specific node types
+  if (adf.type === 'inlineCard' && adf.attrs && adf.attrs.url) {
+    text += adf.attrs.url + ' ';
+  }
+  
+  return text.trim();
 }
 
 /**

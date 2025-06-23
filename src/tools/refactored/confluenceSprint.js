@@ -1,24 +1,24 @@
 import confluenceService from '../../services/confluence.js';
-import { parseSprintFile } from '../../utils/parser.js';
+import { parseSprintFile as parseSprintFileUtil } from '../../utils/parser.js';
 import { config } from '../../config.js';
 
 /**
- * Get confluence sprint assignments - Consolidated tool that merges extract_assigned_tasks and get_engineer_assignments_from_confluence
- * A single tool that can extract tasks from either provided content or the latest sprint planning file
+ * Get sprint planning content and assignments - RAW CONTENT FOR LLM ANALYSIS
+ * Returns raw content for MCP clients (Copilot, Cursor) to analyze directly
  */
-const getConfluenceSprintAssignments = {
-  name: 'get_confluence_sprint_assignments',
-  description: 'Get sprint assignments from Confluence with flexible options (from content or latest file)',
+const getSprintPlanning = {
+  name: 'get_sprint_planning',
+  description: 'Get raw sprint planning content from Confluence for LLM analysis - PRIMARY TOOL for sprint assignments. Returns full raw content for MCP clients to analyze directly rather than pre-processed data.',
   inputSchema: {
     type: 'object',
     properties: {
-      engineerName: {
-        type: 'string',
-        description: 'Name of the engineer to get assignments for (optional)'
-      },
       content: {
         type: 'string',
         description: 'Confluence page content (HTML or storage format, optional - if not provided, will fetch from the latest file)'
+      },
+      engineerName: {
+        type: 'string',
+        description: 'Name of the engineer to get assignments for (optional)'
       },
       spaceKey: {
         type: 'string',
@@ -33,16 +33,30 @@ const getConfluenceSprintAssignments = {
       }
     }
   },
-  handler: async ({ engineerName = null, content = null, spaceKey = config.confluence.sprintPlanningSpace, searchTerms = ['sprint planning', 'Revenue', 'Start'] }) => {
+  handler: async ({ content = null, engineerName = null, spaceKey = config.confluence.sprintPlanningSpace, searchTerms = ['sprint planning', 'Revenue', 'Start'] }) => {
     try {
-      let pageContent = content;
+      let rawContent = content;
       let pageInfo = null;
       
       // If no content provided, fetch from the latest sprint planning file
-      if (!pageContent) {
-        // Search for pages containing sprint planning terms
-        // Use proper CQL text search syntax
-        const searchQuery = searchTerms.map(term => `text ~ "${term}"`).join(' AND ');
+      if (!rawContent) {
+        const searchQuery = searchTerms.map(term => {
+          // If term looks like a sprint version number (e.g. 25.16)
+          if (/^\d+\.\d+$/.test(term)) {
+            // Convert 25.16 to both patterns: 2025-16 and 25.16
+            const [major, minor] = term.split('.');
+            const patterns = [
+              `20${major}-${minor}`, // 2025-16 format
+              term // 25.16 format
+            ];
+            return `(${patterns.map(p => `title ~ "${p}"`).join(' OR ')})`;
+          }
+          // If term contains spaces, wrap it properly
+          if (term.includes(' ')) {
+            return `(title ~ "\\"${term}\\"" OR text ~ "\\"${term}\\"")`;
+          }
+          return `(title ~ "${term}" OR text ~ "${term}")`;
+        }).join(' AND ');
         const searchResult = await confluenceService.searchContent(searchQuery, spaceKey, 'page', 50);
         
         if (!searchResult.success) {
@@ -78,9 +92,8 @@ const getConfluenceSprintAssignments = {
           };
         }
         
-        // Store the page information
-        pageContent = pageResult.data.body.storage.value;
         const page = pageResult.data;
+        rawContent = page.body.storage.value;
         
         // Properly construct Confluence page URL
         const cleanHost = config.confluence.host
@@ -88,162 +101,57 @@ const getConfluenceSprintAssignments = {
           .replace(/\/$/, '');
         
         pageInfo = {
-          pageId: page.id,
           title: page.title,
           url: `https://${cleanHost}/wiki${page._links.webui}`,
           lastModified: page.version.when,
-          lastModifiedBy: page.version.by.displayName,
-          space: page.space,
-          otherFiles: sortedResults.slice(1, 5).map(file => ({
-            id: file.id,
-            title: file.title,
-            lastModified: file.version.when,
-            url: `https://${cleanHost}/wiki${file._links.webui}`
-          }))
+          lastModifiedBy: page.version.by.displayName
         };
       }
       
-      if (!pageContent) {
+      if (!rawContent) {
         return {
           success: false,
-          error: 'Failed to retrieve or use Confluence content'
+          error: 'No content provided or found'
         };
       }
       
-      // Parse the sprint assignments from the content
-      const parseResult = parseSprintFile(pageContent);
+      // RETURN RAW CONTENT FOR LLM ANALYSIS - No heavy processing
+      // Let MCP clients (Copilot, Cursor) analyze the content directly
       
-      if (!parseResult.success) {
-        return parseResult;
+      // Get basic engineer list from simple parsing (for reference only)
+      let availableEngineers = [];
+      try {
+        const parseResult = parseSprintFileUtil(rawContent);
+        if (parseResult.success) {
+          availableEngineers = Object.keys(parseResult.data || {});
+        }
+      } catch (error) {
+        // Don't fail if parsing has issues - raw content is primary
+        console.warn('Warning: Could not extract engineer list:', error.message);
       }
       
-      const { assignments, sections } = parseResult.data;
-      
-      // Group assignments by engineer with enhanced metadata
-      const engineerAssignments = {};
-      
-      assignments.forEach(assignment => {
-        assignment.assignees.forEach(assignee => {
-          const { name, role, platform, confident, storyPoints } = assignee;
-          
-          if (!engineerAssignments[name]) {
-            engineerAssignments[name] = [];
-          }
-          
-          // Construct proper links
-          const cleanJiraHost = config.jira.host
-            .replace(/^https?:\/\//, '')
-            .replace(/\/$/, '');
-
-          const task = {
-            cppfId: assignment.cppfId,
-            creId: assignment.creId,
-            section: assignment.section,
-            description: assignment.description || 'No description',
-            platforms: assignment.platforms || [],
-            role,
-            platform,
-            status: assignment.status || {},
-            confident,
-            storyPoints,
-            dates: assignment.dates || {},
-            // URLs
-            url: assignment.creId ? `https://${cleanJiraHost}/browse/${assignment.creId}` : null,
-            cppfUrl: assignment.cppfId ? `https://${cleanJiraHost}/browse/${assignment.cppfId}` : null
-          };
-          
-          engineerAssignments[name].push(task);
-        });
-      });
-      
-      // If specific engineer requested, filter for that engineer
-      if (engineerName) {
-        const normalizedEngineerName = engineerName.toLowerCase().trim();
-        
-        // Find matching engineer (case-insensitive, partial match)
-        const matchingEngineer = Object.keys(engineerAssignments).find(name => 
-          name.toLowerCase().includes(normalizedEngineerName) ||
-          normalizedEngineerName.includes(name.toLowerCase())
-        );
-        
-        if (!matchingEngineer) {
-          return {
-            success: false,
-            error: `Engineer "${engineerName}" not found in assignments. Available engineers: ${Object.keys(engineerAssignments).join(', ')}`
-          };
-        }
-        
-        return {
-          success: true,
-          data: {
-            engineer: matchingEngineer,
-            tasks: engineerAssignments[matchingEngineer],
-            totalTasks: engineerAssignments[matchingEngineer].length,
-            availableEngineers: Object.keys(engineerAssignments),
-            sections,
-            pageInfo
-          }
-        };
-      }
-      
-      // Return all assignments
-      const summary = Object.entries(engineerAssignments).map(([engineer, tasks]) => ({
-        engineer,
-        taskCount: tasks.length,
-        tasks,
-        statistics: {
-          bySection: tasks.reduce((acc, task) => {
-            acc[task.section] = (acc[task.section] || 0) + 1;
-            return acc;
-          }, {}),
-          byPlatform: tasks.reduce((acc, task) => {
-            if (task.platform) {
-              acc[task.platform] = (acc[task.platform] || 0) + 1;
-            }
-            return acc;
-          }, {}),
-          byStatus: tasks.reduce((acc, task) => {
-            const status = task.status.deleted ? 'Deleted' : 
-                          task.status.done ? 'Done' : 'In Progress';
-            acc[status] = (acc[status] || 0) + 1;
-            return acc;
-          }, {})
-        }
-      }));
-      
-      // Calculate overall statistics
-      const totalTasks = summary.reduce((sum, { taskCount }) => sum + taskCount, 0);
-      const allSections = [...new Set(assignments.map(a => a.section))];
-      const allPlatforms = [...new Set(assignments.flatMap(a => a.platforms || []))];
-
       return {
         success: true,
         data: {
-          totalEngineers: summary.length,
-          totalTasks,
-          assignments: summary,
-          sections: allSections,
-          platforms: allPlatforms,
-          statistics: {
-            bySection: assignments.reduce((acc, a) => {
-              acc[a.section] = (acc[a.section] || 0) + 1;
-              return acc;
-            }, {}),
-            byPlatform: assignments.reduce((acc, a) => {
-              (a.platforms || []).forEach(p => {
-                acc[p] = (acc[p] || 0) + 1;
-              });
-              return acc;
-            }, {}),
-            byStatus: assignments.reduce((acc, a) => {
-              const status = a.status.deleted ? 'Deleted' : 
-                           a.status.done ? 'Done' : 'In Progress';
-              acc[status] = (acc[status] || 0) + 1;
-              return acc;
-            }, {})
-          },
+          // PRIMARY: Raw content for MCP client analysis
+          rawContent: rawContent,
+          
+          // INSTRUCTION FOR MCP CLIENT
+          instruction: "This is the raw sprint planning content from Confluence. Please analyze this content directly to find sprint assignments. Look for engineer names followed by task assignments, CPPF tickets, and CRE tickets. The content may be in HTML format with nested lists.",
+          
+          // MINIMAL METADATA (don't over-process)
           pageInfo,
-          warnings: parseResult.warnings || []
+          availableEngineers,
+          
+          // SIMPLE STATS
+          contentLength: rawContent.length,
+          lastUpdated: pageInfo?.lastModified,
+          
+          // HINT FOR ENGINEER FILTERING (if requested)
+          ...(engineerName && {
+            engineerFilter: engineerName,
+            hint: `Look for assignments for engineer: ${engineerName}. Check for patterns like '${engineerName}PIC', 'Web.${engineerName}', 'BE.${engineerName}', or '${engineerName}.PIC' in the content.`
+          })
         }
       };
     } catch (error) {
@@ -252,98 +160,5 @@ const getConfluenceSprintAssignments = {
   }
 };
 
-/**
- * Find the latest sprint planning Confluence file in a specific space
- */
-const findLatestSprintPlanningFile = {
-  name: 'find_latest_sprint_planning_file',
-  description: 'Find the latest sprint planning Confluence file in a specific space',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      spaceKey: {
-        type: 'string',
-        description: 'Confluence space key to search in (defaults to configured SPRINT_PLANNING_SPACE)',
-        default: config.confluence.sprintPlanningSpace
-      },
-      searchTerms: {
-        type: 'array',
-        items: { type: 'string' },
-        description: 'Search terms to identify sprint planning files',
-        default: ['sprint planning', 'Revenue', 'Start']
-      }
-    }
-  },
-  handler: async ({ spaceKey = config.confluence.sprintPlanningSpace, searchTerms = ['sprint planning', 'Revenue', 'Start'] }) => {
-    try {
-      // Search for pages containing sprint planning terms
-      // Use proper CQL text search syntax
-      const searchQuery = searchTerms.map(term => `text ~ "${term}"`).join(' AND ');
-      const searchResult = await confluenceService.searchContent(searchQuery, spaceKey, 'page', 50);
-      
-      if (!searchResult.success) {
-        return {
-          success: false,
-          error: `Failed to search Confluence space: ${searchResult.error}`
-        };
-      }
-      
-      if (!searchResult.data.results || searchResult.data.results.length === 0) {
-        return {
-          success: false,
-          error: 'No sprint planning files found in the specified space'
-        };
-      }
-      
-      // Sort by created date descending to get the latest file
-      const sortedResults = searchResult.data.results.sort((a, b) => {
-        const dateA = new Date(a.version.when);
-        const dateB = new Date(b.version.when);
-        return dateB.getTime() - dateA.getTime();
-      });
-      
-      const latestFile = sortedResults[0];
-      
-      // Get the full page content
-      const pageResult = await confluenceService.getPage(latestFile.id);
-      
-      if (!pageResult.success) {
-        return {
-          success: false,
-          error: `Failed to retrieve page content: ${pageResult.error}`
-        };
-      }
-      
-      const page = pageResult.data;
-      
-      // Properly construct Confluence page URL
-      const cleanHost = config.confluence.host
-        .replace(/^https?:\/\//, '')
-        .replace(/\/$/, '');
-      
-      return {
-        success: true,
-        data: {
-          pageId: page.id,
-          title: page.title,
-          url: `https://${cleanHost}/wiki${page._links.webui}`,
-          lastModified: page.version.when,
-          lastModifiedBy: page.version.by.displayName,
-          content: page.body.storage.value,
-          space: page.space,
-          totalResults: sortedResults.length,
-          otherFiles: sortedResults.slice(1, 5).map(file => ({
-            id: file.id,
-            title: file.title,
-            lastModified: file.version.when,
-            url: `https://${cleanHost}/wiki${file._links.webui}`
-          }))
-        }
-      };
-    } catch (error) {
-      return { success: false, error: error.message };
-    }
-  }
-};
-
-export default [getConfluenceSprintAssignments, findLatestSprintPlanningFile];
+// Export only the essential tool - ONE tool that does it all
+export default [getSprintPlanning];

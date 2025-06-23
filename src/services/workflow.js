@@ -48,11 +48,21 @@ class WorkflowService {
 
     const cppfData = cppfResponse.data;
     
-    // Use the helper function to safely extract description
+    // Use the helper function to safely extract description for requirements analysis
     const description = this._extractJiraText(cppfData.cppf.fields.description);
     
-    // Detect required platforms
-    const detectedPlatforms = detectPlatforms(description);
+    // Get platforms directly from Jira field (since this is a CPPF)
+    const platformField = cppfData.cppf.fields.customfield_10601;
+    let detectedPlatforms = [];
+    
+    if (platformField && Array.isArray(platformField) && platformField.length > 0) {
+      detectedPlatforms = platformField.map(item => item?.value || item).filter(Boolean);
+    }
+    
+    // Fallback to content parsing if no platform field (shouldn't happen for CPPF)
+    if (detectedPlatforms.length === 0) {
+      detectedPlatforms = detectPlatforms(description, cppfData.cppf);
+    }
     
     // Extract requirements based on role
     const requirements = extractRequirements(description, role);
@@ -202,9 +212,55 @@ class WorkflowService {
           summary: `${platformPrefix} ${cppf.fields.summary}`,
           issuetype: {
             name: 'Story'
+          },
+          assignee: {
+            accountId: config.user.accountId // Auto-fill assignee
           }
         }
       };
+
+      // Add optional fields based on what's available in the project
+      try {
+        if (metaResponse.success) {
+          const storyFields = metaResponse.data.projects[0]?.issuetypes
+            ?.find(type => type.name === 'Story')?.fields;
+          
+          if (storyFields) {
+            // Add sprint field if available
+            const sprintField = storyFields[config.jira.customFields.sprint];
+            if (sprintField && config.user.currentSprint) {
+              console.log(`Adding sprint field ${config.jira.customFields.sprint}: ${config.user.currentSprint}`);
+              storyData.fields[config.jira.customFields.sprint] = config.user.currentSprint;
+            } else {
+              console.warn(`Sprint field ${config.jira.customFields.sprint} not available in Story create screen`);
+            }
+
+            // Add Release PIC field
+            const releasePicField = Object.values(storyFields)
+              .find(field => field.name?.toLowerCase().includes('release') && field.name?.toLowerCase().includes('pic'));
+            
+            if (releasePicField) {
+              storyData.fields[releasePicField.key] = {
+                accountId: config.user.accountId
+              };
+            }
+            
+            // Add QA field
+            const qaField = Object.values(storyFields)
+              .find(field => field.name?.toLowerCase().includes('qa'));
+            
+            if (qaField) {
+              storyData.fields[qaField.key] = {
+                emailAddress: 'vuhoang@chotot.vn'
+              };
+            }
+          }
+        } else {
+          console.warn('Could not get create metadata - sprint field will not be set');
+        }
+      } catch (metaError) {
+        console.warn('Could not get create meta for auto-fill fields:', metaError.message);
+      }
 
       // Add description if we can generate it
       try {
@@ -294,11 +350,22 @@ class WorkflowService {
       
       const story = storyResponse.data;
       
-      // If platforms not specified, try to detect from story description
-      // Use the helper function to safely extract description
-      const description = this._extractJiraText(story.fields.description);
+      // If platforms not specified, try to get from story platform field or detect from description
+      let targetPlatforms = platforms;
       
-      const targetPlatforms = platforms || detectPlatforms(description) || config.workflow.platforms;
+      if (!targetPlatforms) {
+        // First try to get platforms from the platform field (if CRE stories have it)
+        const platformField = story.fields.customfield_10601;
+        if (platformField && Array.isArray(platformField) && platformField.length > 0) {
+          targetPlatforms = platformField.map(item => item?.value || item).filter(Boolean);
+        }
+        
+        // Fallback to content parsing if no platform field
+        if (!targetPlatforms || targetPlatforms.length === 0) {
+          const description = this._extractJiraText(story.fields.description);
+          targetPlatforms = detectPlatforms(description, story) || config.workflow.platforms;
+        }
+      }
       
       const createdTasks = [];
       
@@ -309,22 +376,100 @@ class WorkflowService {
             project: {
               key: config.jira.projects.cre
             },
-            summary: `[${platform.toUpperCase()}] ${story.fields.summary}`,
-            description: `Implementation task for ${platform} platform.\n\nParent Story: ${storyId}`,
+            summary: this._generateTaskSummary(story.fields.summary, platform),
+            description: {
+              type: 'doc',
+              version: 1,
+              content: [
+                {
+                  type: 'paragraph',
+                  content: [
+                    {
+                      type: 'text',
+                      text: `Implementation task for ${platform} platform.\n\nParent Story: ${storyId}`
+                    }
+                  ]
+                }
+              ]
+            },
             issuetype: {
               name: 'Task'
             },
             priority: story.fields.priority,
-            // Link to parent
-            parent: {
-              key: storyId
+            assignee: {
+              accountId: config.user.accountId // Auto-fill assignee
             }
+            // Note: parent field removed - will create issue link instead
           }
         };
         
+        // Add optional fields based on what's available in the project
+        try {
+          const createMeta = await jiraService.getCreateMeta(config.jira.projects.cre);
+          if (createMeta.success) {
+            const taskFields = createMeta.data.projects[0]?.issuetypes
+              ?.find(type => type.name === 'Task')?.fields;
+            
+            if (taskFields) {
+              // Add sprint field if available
+              const sprintField = taskFields[config.jira.customFields.sprint];
+              if (sprintField && config.user.currentSprint) {
+                console.log(`Adding sprint field ${config.jira.customFields.sprint} to task: ${config.user.currentSprint}`);
+                taskData.fields[config.jira.customFields.sprint] = config.user.currentSprint;
+              } else {
+                console.warn(`Sprint field ${config.jira.customFields.sprint} not available in Task create screen`);
+              }
+
+              // Add Engineer field
+              const engineerField = Object.values(taskFields)
+                .find(field => field.name?.toLowerCase().includes('engineer'));
+              
+              if (engineerField) {
+                taskData.fields[engineerField.key] = {
+                  accountId: config.user.accountId
+                };
+              }
+              
+              // Add QA field
+              const qaField = Object.values(taskFields)
+                .find(field => field.name?.toLowerCase().includes('qa'));
+              
+              if (qaField) {
+                taskData.fields[qaField.key] = {
+                  emailAddress: 'vuhoang@chotot.vn'
+                };
+              }
+            }
+          } else {
+            console.warn('Could not get create metadata for tasks - sprint field will not be set');
+          }
+        } catch (metaError) {
+          console.warn('Could not get create meta for auto-fill fields:', metaError.message);
+        }
+        
         const createResponse = await jiraService.createIssue(taskData);
         if (createResponse.success) {
-          createdTasks.push(createResponse.data);
+          const newTask = createResponse.data;
+          createdTasks.push(newTask);
+          
+          // Create issue link between task and story using "is child of"/"is parent of" relationship
+          try {
+            // Create child-parent relationship (task is child of story)
+            const linkResponse = await jiraService.createIssueLink(newTask.key, storyId, 'Parent');
+            
+            if (!linkResponse.success) {
+              // Try alternative naming patterns for parent-child relationships
+              const altResponse = await jiraService.createIssueLink(newTask.key, storyId, 'Parent-Child');
+              
+              if (!altResponse.success) {
+                // Final fallback to "Relates" link
+                await jiraService.createIssueLink(newTask.key, storyId, 'Relates');
+                console.warn(`Used Relates link as fallback for ${newTask.key} -> ${storyId}`);
+              }
+            }
+          } catch (linkError) {
+            console.warn(`Could not create issue link between ${newTask.key} and ${storyId}:`, linkError.message);
+          }
         }
       }
       
@@ -1093,51 +1238,81 @@ class WorkflowService {
 
   async _determinePlatformPrefix(cppf, confluenceDocs) {
     try {
-      // First check the platforms field if available
-      const platformField = cppf.fields.customfield_10120 || cppf.fields.platforms; // Add actual custom field ID
-      if (platformField) {
-        if (typeof platformField === 'string') {
-          if (platformField.toLowerCase().includes('all platform')) {
+      // Get platforms directly from the platform field
+      const platformField = cppf.fields.customfield_10601;
+      
+      if (platformField && Array.isArray(platformField) && platformField.length > 0) {
+        const platforms = platformField.map(item => item?.value || item).filter(Boolean);
+        
+        if (platforms.length > 0) {
+          // Handle "All Platforms" case
+          if (platforms.some(p => p === 'All Platforms')) {
             return '[+][FE/BE]';
           }
+          
+          // Map Jira platform names to prefixes
+          const platformMap = {
+            'Web browser': 'Web',
+            'Mobile browser': 'Web',
+            'Android': 'Android',
+            'iOS': 'iOS',
+            'Internal': 'BE'
+          };
+          
+          const platformAbbrs = platforms
+            .map(p => platformMap[p] || p.toUpperCase())
+            .filter(Boolean);
+          
+          return `[+][${platformAbbrs.join('/')}]`;
         }
       }
-
-      // Extract text from description and confluence docs
-      const description = this._extractJiraText(cppf.fields.description);
-      let allText = description;
-
-      // Add text from confluence docs
-      if (confluenceDocs && confluenceDocs.length > 0) {
-        for (const doc of confluenceDocs) {
-          if (doc.body?.storage?.value) {
-            allText += ' ' + doc.body.storage.value;
-          }
-        }
-      }
-
-      // Detect platforms from all text
-      const detectedPlatforms = detectPlatforms(allText);
       
-      if (!detectedPlatforms || detectedPlatforms.length === 0) {
-        // Default to [FE/BE] if no platforms detected
-        return '[+][FE/BE]';
-      }
-
-      // If all major platforms are mentioned, use [FE/BE]
-      const majorPlatforms = ['web', 'backend', 'app', 'ios'];
-      const detectedMajorPlatforms = detectedPlatforms.filter(p => majorPlatforms.includes(p.toLowerCase()));
-      if (detectedMajorPlatforms.length >= 3) { // If 3 or more major platforms are detected
-        return '[+][FE/BE]';
-      }
-
-      // Otherwise use detected platforms
-      const platformAbbrs = detectedPlatforms.map(p => p.toUpperCase());
-      return `[+][${platformAbbrs.join('/')}]`;
+      // Fallback if no platform field found
+      return '[+][FE/BE]';
     } catch (error) {
       console.error('Error determining platform prefix:', error);
-      return '[+][FE/BE]'; // Default fallback
+      return '[+][FE/BE]';
     }
+  }
+
+  /**
+   * Generate task summary with proper platform prefix
+   * @param {string} storySummary - The original story summary
+   * @param {string} platform - The platform name (web, backend, app, ios)
+   * @returns {string} - The formatted task summary
+   * @private
+   */
+  _generateTaskSummary(storySummary, platform) {
+    // Platform mapping to display names
+    const platformMap = {
+      'web': 'Web',
+      'backend': 'BE', 
+      'app': 'Android',
+      'ios': 'iOS'
+    };
+    
+    const platformDisplay = platformMap[platform.toLowerCase()] || platform.toUpperCase();
+    
+    // Check if story already has [+] prefix
+    if (storySummary.startsWith('[+]')) {
+      // Extract everything after the first platform prefix
+      // Pattern: [+][Platform] or [+][Platform1/Platform2] followed by the rest
+      const match = storySummary.match(/^\[\+\]\[([^\]]+)\](.*)$/);
+      if (match) {
+        const restOfSummary = match[2].trim();
+        return `[+][${platformDisplay}]${restOfSummary}`;
+      }
+    }
+    
+    // Check if story has old format [Platform] prefix
+    const oldFormatMatch = storySummary.match(/^\[([^\]]+)\](.*)$/);
+    if (oldFormatMatch) {
+      const restOfSummary = oldFormatMatch[2].trim();
+      return `[+][${platformDisplay}]${restOfSummary}`;
+    }
+    
+    // If no recognizable prefix, add the new format prefix
+    return `[+][${platformDisplay}] ${storySummary}`;
   }
 }
 
