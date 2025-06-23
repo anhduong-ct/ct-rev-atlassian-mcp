@@ -11,6 +11,7 @@ jspm_packages/
 
 # Build outputs
 dist/
+!dist/index.js
 build/
 out/
 .next/
