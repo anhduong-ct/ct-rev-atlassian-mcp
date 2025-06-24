@@ -163,7 +163,7 @@ class JiraService {
     }
   }
 
-  async searchIssues(jql, fields = ['summary', 'status', 'assignee', 'description'], startAt = 0, maxResults = 50) {
+  async searchIssues(jql, fields = ['summary', 'status', 'assignee', 'description', 'issuetype'], startAt = 0, maxResults = 50) {
     try {
       const response = await axios({
         method: 'POST',

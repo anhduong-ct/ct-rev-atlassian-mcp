@@ -565,18 +565,19 @@ class WorkflowService {
       }
       
       const currentStatus = issueResponse.data.fields.status.name;
+      console.log(`Current status for ${taskId}: ${currentStatus}`);
       
       // Define workflow paths and allowed transitions based on the provided image
       const workflowPaths = {
-        'NEW': ['FOR DEVELOPMENT', 'DISCUSSION', 'CLOSED'], // Reordered to prioritize direct 'FOR DEVELOPMENT'
+        'NEW': ['FOR DEVELOPMENT', 'CLOSED'], // Reordered to prioritize direct 'FOR DEVELOPMENT'
         'DISCUSSION': ['NEW', 'FOR DEVELOPMENT', 'CLOSED'],
-        'FOR DEVELOPMENT': ['NEW', 'DEVELOPING'],
+        'FOR DEVELOPMENT': ['NEW', 'DISCUSSION', 'DEVELOPING'],
         'DEVELOPING': ['FOR DEVELOPMENT', 'WAITING FOR REVIEW'],
         'WAITING FOR REVIEW': ['DEVELOPING', 'ON STAGING'],
-        'ON STAGING': ['DEVELOPING', 'READY TO UAT', 'READY TO PROD'],
+        'ON STAGING': ['WAITING FOR REVIEW', 'READY TO UAT'],
         'READY TO UAT': ['ON STAGING', 'ON UAT'],
-        'ON UAT': ['READY TO PROD', 'CLOSED'],
-        'READY TO PROD': ['ON PRODUCTION', 'CLOSED'],
+        'ON UAT': ['READY TO PROD'],
+        'READY TO PROD': ['ON PRODUCTION', 'ON STAGING'],
         'ON PRODUCTION': ['CLOSED']
         // CLOSED is a terminal state, no outgoing paths from it in this map
       };
@@ -607,29 +608,139 @@ class WorkflowService {
         return transitionsResponse;
       }
 
-      // Find valid path to target status
-      const findPath = (start, end, visited = new Set()) => {
-        if (start === end) return [start];
-        // Ensure start status exists in workflowPaths and hasn't been visited in current path search
-        if (!workflowPaths[start] || visited.has(start)) return null;
-        
-        visited.add(start); // Add current node to visited set for this path search
-        for (const nextStatus of workflowPaths[start]) {
-          // Pass a *copy* of the visited set to recursive calls to avoid interference
-          const pathResult = findPath(nextStatus, end, new Set(visited)); 
-          if (pathResult) {
-            // Path found, no need to alter 'visited' of this frame before returning
-            return [start, ...pathResult];
+      // Find valid path to target status using backward tracing with smart path selection
+      // This approach finds the shortest path while preferring logical workflow sequences
+      const findOptimalPath = (currentStatus, targetStatus) => {
+        // Create reverse mapping to find which statuses can lead to each status
+        const reverseWorkflowPaths = {};
+        for (const [fromStatus, toStatuses] of Object.entries(workflowPaths)) {
+          for (const toStatus of toStatuses) {
+            if (!reverseWorkflowPaths[toStatus]) {
+              reverseWorkflowPaths[toStatus] = [];
+            }
+            reverseWorkflowPaths[toStatus].push(fromStatus);
           }
         }
-        // No path found through any 'nextStatus' from this 'start' node.
-        // Backtrack: remove 'start' from this frame's visited set.
-        // This is important if this 'visited' set was passed by reference from a caller.
-        visited.delete(start); 
-        return null;
+
+        // Define logical workflow sequences to prefer direct progression for ALL statuses
+        // This maps each status to its preferred predecessor(s) based on natural workflow flow
+        const preferredPredecessors = {
+          // Development flow preferences
+          'FOR DEVELOPMENT': ['NEW'], // Prefer coming from NEW rather than DISCUSSION
+          'DEVELOPING': ['FOR DEVELOPMENT'], // Prefer coming from FOR DEVELOPMENT rather than ON STAGING
+          'WAITING FOR REVIEW': ['DEVELOPING'], // Natural progression from development
+          'ON STAGING': ['WAITING FOR REVIEW'], // Prefer coming from review rather than backtracking
+          
+          // UAT flow preferences  
+          'READY TO UAT': ['ON STAGING'], // Natural progression to UAT preparation
+          'ON UAT': ['READY TO UAT'], // Natural progression from ready to UAT
+          
+          // Production flow preferences
+          'READY TO PROD': ['ON UAT'], // Prefer coming from UAT rather than staging (main fix)
+          'ON PRODUCTION': ['READY TO PROD'], // Natural progression from ready to prod
+          
+          // Terminal state preferences
+          'CLOSED': ['ON PRODUCTION'], // Prefer completing full workflow rather than early closure
+          
+          // Discussion flow (less common paths)
+          'DISCUSSION': ['NEW'], // If going to discussion, prefer from NEW
+        };
+
+        // Fallback strategy: if no preferred predecessors are defined for a status,
+        // prefer predecessors that represent forward progression (avoid backtracking)
+        const getPreferredPredecessorsWithFallback = (status, allPredecessors) => {
+          // If we have explicit preferences, use them
+          if (preferredPredecessors[status]) {
+            return preferredPredecessors[status];
+          }
+          
+          // Fallback: prefer predecessors that don't represent backtracking
+          // Define "forward progression" order based on typical workflow stages
+          const progressionOrder = [
+            'NEW', 'DISCUSSION', 'FOR DEVELOPMENT', 'DEVELOPING', 
+            'WAITING FOR REVIEW', 'ON STAGING', 'READY TO UAT', 'ON UAT', 
+            'READY TO PROD', 'ON PRODUCTION', 'CLOSED'
+          ];
+          
+          const currentIndex = progressionOrder.indexOf(status);
+          if (currentIndex > 0) {
+            // Prefer predecessors that come immediately before in the progression
+            const preferredByProgression = allPredecessors.filter(pred => {
+              const predIndex = progressionOrder.indexOf(pred);
+              return predIndex >= 0 && predIndex < currentIndex;
+            });
+            
+            if (preferredByProgression.length > 0) {
+              // Sort by proximity to current status (closer = more preferred)
+              return preferredByProgression.sort((a, b) => {
+                const aIndex = progressionOrder.indexOf(a);
+                const bIndex = progressionOrder.indexOf(b);
+                return (currentIndex - aIndex) - (currentIndex - bIndex);
+              });
+            }
+          }
+          
+          // If no logical progression found, return empty array (no preference)
+          return [];
+        };
+
+        // Use BFS to find shortest path by working backwards from target
+        const queue = [{ status: targetStatus, path: [targetStatus] }];
+        const visited = new Set([targetStatus]);
+
+        while (queue.length > 0) {
+          const { status, path } = queue.shift();
+          
+          // If we've reached the current status, we found the path
+          if (status === currentStatus) {
+            return path.reverse(); // Reverse because we built it backwards
+          }
+          
+          // Get all statuses that can lead to the current status
+          let predecessors = reverseWorkflowPaths[status] || [];
+          
+          // Sort predecessors to prefer logical workflow sequences
+          predecessors = predecessors.sort((a, b) => {
+            // Get preferred predecessors for current status (with fallback logic)
+            const preferred = getPreferredPredecessorsWithFallback(status, predecessors);
+            
+            const aIndex = preferred.indexOf(a);
+            const bIndex = preferred.indexOf(b);
+            
+            // If both a and b are in preferred list, sort by their order in the preferred list
+            if (aIndex !== -1 && bIndex !== -1) {
+              return aIndex - bIndex;
+            }
+            
+            // If only a is preferred, it comes first
+            if (aIndex !== -1) {
+              return -1;
+            }
+            
+            // If only b is preferred, it comes first
+            if (bIndex !== -1) {
+              return 1;
+            }
+            
+            // If neither is explicitly preferred, maintain original order
+            return 0;
+          });
+          
+          for (const predecessor of predecessors) {
+            if (!visited.has(predecessor)) {
+              visited.add(predecessor);
+              queue.push({
+                status: predecessor,
+                path: [...path, predecessor]
+              });
+            }
+          }
+        }
+        
+        return null; // No path found
       };
 
-      const path = findPath(normalizedCurrent, normalizedTarget);
+      const path = findOptimalPath(normalizedCurrent, normalizedTarget);
       
       if (!path || path.length === 0) {
         return {
@@ -640,16 +751,18 @@ class WorkflowService {
 
       // Execute transitions along the path
       // path[0] is the current status. Transitions start from path[1].
-      let currentIssueStatusForLogging = currentStatus; 
+      let currentIssueStatusForLogging = currentStatus;
+      let currentTransitionsResponse = transitionsResponse; // Use initial transitions for first step
+      
       for (let i = 1; i < path.length; i++) {
         const nextStateInPath = path[i];
         // Find a Jira transition whose TARGET status matches the nextStateInPath
-        const targetTransition = transitionsResponse.data.transitions.find(
+        const targetTransition = currentTransitionsResponse.data.transitions.find(
           t => t.to && t.to.name && normalizeStatus(t.to.name) === nextStateInPath
         );
-
+        
         if (!targetTransition) {
-          const availableTargets = transitionsResponse.data.transitions
+          const availableTargets = currentTransitionsResponse.data.transitions
             .map(t => t.to && t.to.name ? normalizeStatus(t.to.name) : null)
             .filter(name => name)
             .join(', ');
@@ -666,7 +779,20 @@ class WorkflowService {
             error: `Failed to transition from "${currentIssueStatusForLogging}" to "${nextStateInPath}" (using Jira transition "${targetTransition.name}" to status "${targetTransition.to.name}"): ${updateResponse.error}`
           };
         }
+        
         currentIssueStatusForLogging = nextStateInPath; // Update for logging in the next iteration
+        
+        // Refetch available transitions for the next step (if there are more steps)
+        if (i + 1 < path.length) {
+          const refreshedTransitionsResponse = await jiraService.getTransitions(taskId);
+          if (!refreshedTransitionsResponse.success) {
+            return {
+              success: false,
+              error: `Failed to fetch transitions after moving to "${nextStateInPath}": ${refreshedTransitionsResponse.error}`
+            };
+          }
+          currentTransitionsResponse = refreshedTransitionsResponse;
+        }
       }
 
       return {

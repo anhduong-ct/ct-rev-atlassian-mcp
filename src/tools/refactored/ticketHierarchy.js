@@ -169,7 +169,7 @@ const getTicketInfo = {
         return response;
       }
       
-      const { ticket, parents, children, linkedIssues } = response.data;
+      const { ticket, parents, children, linkedIssues, bugs } = response.data;
       
       // FILTERED TICKET DATA - Only essential fields
       const filteredTicket = {
@@ -213,7 +213,16 @@ const getTicketInfo = {
         type: linked.fields.issuetype?.name || 'Unknown',
         linkType: linked.linkType || 'Unknown'
       }));
-      
+
+      const filteredBugs = bugs.map(bug => ({
+        key: bug.key,
+        url: getJiraTicketUrl(bug.key),
+        summary: bug.fields.summary,      
+        status: bug.fields.status?.name || 'Unknown',
+        type: bug.fields.issuetype?.name || 'Bug',
+        linkType: 'Bug'
+      }));
+
       const result = {
         success: true,
         data: {
@@ -223,7 +232,8 @@ const getTicketInfo = {
             parents: filteredParents,
             children: filteredChildren,
             linkedIssues: filteredLinkedIssues,
-            totalRelated: filteredParents.length + filteredChildren.length + filteredLinkedIssues.length
+            bugs: filteredBugs,
+            totalRelated: filteredParents.length + filteredChildren.length + filteredLinkedIssues.length + filteredBugs.length
           },
           
           // ANALYSIS SUMMARY

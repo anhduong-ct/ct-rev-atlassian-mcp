@@ -100,6 +100,7 @@ class WorkflowService {
       let cppf = null;
       let creStory = null;
       let creTasks = [];
+      let bugs = [];
       
       // If it's a CPPF ticket
       if (isCPPF) {
@@ -222,10 +223,14 @@ class WorkflowService {
         
         // Find child tasks (if direction is 'down' or 'both')
         if (direction === 'down' || direction === 'both') {
-          const taskResponse = await this.getLinkedIssues(story.key, 'outward');
+          const taskResponse = await this.getLinkedIssues(story.key, 'both');
           creTasks = taskResponse.filter(i => 
             i.key.startsWith(config.jira.projects.cre) && 
             i.fields?.issuetype?.name?.toLowerCase()?.includes('task')
+          );
+          bugs = taskResponse.filter(i => 
+            i.key.startsWith(config.jira.projects.cre) && 
+            i.fields?.issuetype?.name?.toLowerCase()?.includes('bug')
           );
         }
         
@@ -246,6 +251,16 @@ class WorkflowService {
             assignee: t.fields.assignee ? t.fields.assignee.displayName : 'Unassigned'
           }));
         }
+
+        if (bugs && bugs.length > 0) {
+          hierarchy.bugs = bugs.map(b => ({
+            key: b.key,
+            summary: b.fields.summary,
+            status: b.fields.status?.name || 'Unknown',
+            assignee: b.fields.assignee ? b.fields.assignee.displayName : 'Unassigned'
+          }));
+        }
+
       }
       
       // Get linked documents if requested
@@ -270,6 +285,7 @@ class WorkflowService {
           cppf: cppf,
           story: creStory,
           tasks: creTasks,
+          bugs,
           documents: includeDocuments ? documents : undefined
         }
       };
@@ -518,6 +534,7 @@ class WorkflowService {
       let parents = [];
       let children = [];
       let linkedIssues = [];
+      let bugs = [];  
       
       const hierarchyData = hierarchyResponse.data;
       const hierarchy = hierarchyData.hierarchy;
@@ -545,6 +562,11 @@ class WorkflowService {
           }
         }
       }
+
+      // Extract bugs
+      if (hierarchyData.bugs && hierarchyData.bugs.length > 0) {
+        bugs.push(...hierarchyData.bugs);
+      }
       
       return {
         success: true,
@@ -552,7 +574,8 @@ class WorkflowService {
           ticket,
           parents,
           children,
-          linkedIssues
+          linkedIssues,
+          bugs,
         }
       };
     } catch (error) {
