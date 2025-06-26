@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Atlassian MCP Server Configuration</title>
+    <style>
+        :root {
+            --primary: #0052CC;
+            --primary-hover: #0747A6;
+            --error: #DE350B;
+            --success: #36B37E;
+            --warning: #FFAB00;
+            --text: #172B4D;
+            --text-light: #6B778C;
+            --bg: #F4F5F7;
+            --bg-card: #FFFFFF;
+            --border: #DFE1E6;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 0;
+            line-height: 1.5;
+        }
+        
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 2rem 1rem;
+        }
+        
+        .card {
+            background-color: var(--bg-card);
+            border-radius: 3px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.24);
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+        
+        h1, h2, h3 {
+            margin-top: 0;
+            color: var(--text);
+        }
+        
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 1.5rem;
+        }
+        
+        .header h1 {
+            margin: 0;
+        }
+        
+        .status {
+            display: flex;
+            align-items: center;
+            font-weight: 500;
+        }
+        
+        .status-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        
+        .status-disconnected .status-indicator {
+            background-color: var(--error);
+        }
+        
+        .status-connected .status-indicator {
+            background-color: var(--success);
+        }
+        
+        form {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+        }
+        
+        .form-section {
+            margin-bottom: 1.5rem;
+            grid-column: span 2;
+        }
+        
+        .form-group {
+            margin-bottom: 1rem;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 500;
+        }
+        
+        input, select {
+            width: 100%;
+            padding: 0.5rem;
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            font-size: 1rem;
+            color: var(--text);
+        }
+        
+        input:focus, select:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 2px rgba(0,82,204,0.2);
+        }
+        
+        .required::after {
+            content: " *";
+            color: var(--error);
+        }
+        
+        button {
+            background-color: var(--primary);
+            color: white;
+            border: none;
+            border-radius: 3px;
+            padding: 0.5rem 1rem;
+            font-size: 1rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        
+        button:hover {
+            background-color: var(--primary-hover);
+        }
+        
+        .button-secondary {
+            background-color: white;
+            color: var(--primary);
+            border: 1px solid var(--primary);
+        }
+        
+        .button-secondary:hover {
+            background-color: rgba(0,82,204,0.1);
+        }
+        
+        .button-row {
+            display: flex;
+            justify-content: flex-end;
+            gap: 1rem;
+            margin-top: 1rem;
+        }
+        
+        .alert {
+            padding: 0.75rem 1rem;
+            border-radius: 3px;
+            margin-bottom: 1rem;
+        }
+        
+        .alert-error {
+            background-color: #FFEBE6;
+            border: 1px solid var(--error);
+            color: var(--error);
+        }
+        
+        .alert-success {
+            background-color: #E3FCEF;
+            border: 1px solid var(--success);
+            color: var(--success);
+        }
+        
+        .alert-warning {
+            background-color: #FFFAE6;
+            border: 1px solid var(--warning);
+            color: var(--warning);
+        }
+        
+        .hidden {
+            display: none;
+        }
+        
+        .col-span-2 {
+            grid-column: span 2;
+        }
+        
+        .integration-card {
+            margin-top: 1.5rem;
+            padding: 1rem;
+            background-color: #F4F9FF;
+            border-left: 4px solid var(--primary);
+        }
+        
+        code {
+            background-color: rgba(9,30,66,0.08);
+            border-radius: 3px;
+            padding: 0.2rem 0.4rem;
+            font-family: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            font-size: 0.9em;
+        }
+        
+        pre {
+            background-color: rgba(9,30,66,0.08);
+            border-radius: 3px;
+            padding: 1rem;
+            overflow-x: auto;
+            font-family: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Atlassian MCP Server</h1>
+            <div class="status status-disconnected">
+                <div class="status-indicator"></div>
+                <span id="status-text">Disconnected</span>
+            </div>
+        </div>
+        
+        <div class="card">
+            <h2>Configuration</h2>
+            <p>Configure your Atlassian credentials and settings for the MCP server.</p>
+            
+            <div id="alert-container"></div>
+            
+            <form id="config-form">
+                <div class="form-section">
+                    <h3>Jira Configuration</h3>
+                    <div class="form-group">
+                        <label for="jira_host" class="required">Jira Host URL</label>
+                        <input type="url" id="jira_host" name="jira_host" placeholder="https://your-company.atlassian.net" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="jira_email" class="required">Jira Email</label>
+                        <input type="email" id="jira_email" name="jira_email" placeholder="your-email@company.com" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="jira_api_token" class="required">Jira API Token</label>
+                        <input type="password" id="jira_api_token" name="jira_api_token" placeholder="Your Jira API Token" required>
+                        <small>(Create at <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank">Atlassian Account Settings</a>)</small>
+                    </div>
+                </div>
+                
+                <div class="form-section">
+                    <h3>Project Configuration</h3>
+                    <div class="form-group">
+                        <label for="jira_cppf_project">CPPF Project Key</label>
+                        <input type="text" id="jira_cppf_project" name="jira_cppf_project" placeholder="CPPF">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="jira_cre_project">CRE Project Key</label>
+                        <input type="text" id="jira_cre_project" name="jira_cre_project" placeholder="CRE">
+                    </div>
+                </div>
+                
+                <div class="form-section">
+                    <h3>Confluence Configuration</h3>
+                    <div class="form-group">
+                        <label for="confluence_host">Confluence Host URL</label>
+                        <input type="url" id="confluence_host" name="confluence_host" placeholder="https://your-company.atlassian.net">
+                        <small>(Leave blank to use Jira host)</small>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="confluence_spaces">Confluence Spaces</label>
+                        <input type="text" id="confluence_spaces" name="confluence_spaces" placeholder="PROD,ENG,DESIGN">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="sprint_planning_space">Sprint Planning Space</label>
+                        <input type="text" id="sprint_planning_space" name="sprint_planning_space" placeholder="~629041681a437e007044041e">
+                    </div>
+                </div>
+                
+                <div class="form-section">
+                    <h3>User Configuration</h3>
+                    <div class="form-group">
+                        <label for="user_account_id" class="required">User Account ID</label>
+                        <input type="text" id="user_account_id" name="user_account_id" placeholder="Your Atlassian Account ID" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="user_role">User Role</label>
+                        <select id="user_role" name="user_role">
+                            <option value="fullstack">Fullstack</option>
+                            <option value="web">Web</option>
+                            <option value="backend">Backend</option>
+                            <option value="app">App</option>
+                            <option value="ios">iOS</option>
+                        </select>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="current_sprint">Current Sprint</label>
+                        <input type="text" id="current_sprint" name="current_sprint" placeholder="Sprint 24">
+                        <small>(Leave blank for auto-detection)</small>
+                    </div>
+                </div>
+                
+                <div class="form-section">
+                    <h3>Workflow Configuration</h3>
+                    <div class="form-group">
+                        <label for="platforms">Platforms</label>
+                        <input type="text" id="platforms" name="platforms" placeholder="web,backend,app,ios">
+                    </div>
+                </div>
+                
+                <div class="button-row col-span-2">
+                    <button type="button" id="test-connection" class="button-secondary">Test Connection</button>
+                    <button type="submit" id="save-config">Save Configuration</button>
+                </div>
+            </form>
+        </div>
+        
+        <div class="card">
+            <h2>Integration</h2>
+            <p>Copy the below URL to use in your MCP client (Cursor, VS Code, Claude, etc.):</p>
+            
+            <div class="integration-card">
+                <code id="integration-url">http://localhost:3000/mcp-events</code>
+                <button id="copy-url" class="button-secondary">Copy</button>
+            </div>
+            
+            <div class="form-section">
+                <h3>Cursor Integration</h3>
+                <p>In Cursor, go to Settings → AI → Model Context Protocol and enter the URL above.</p>
+                
+                <h3>VS Code Integration</h3>
+                <p>Install the MCP Client extension and configure it with the URL above.</p>
+                
+                <h3>Claude Desktop Integration</h3>
+                <p>In Claude Desktop, go to Settings → Advanced → Model Context Protocol and enter the URL above.</p>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // Global variables
+        let eventSource = null;
+        let clientId = null;
+        const baseUrl = window.location.origin;
+        
+        // DOM elements
+        const statusText = document.getElementById('status-text');
+        const statusContainer = document.querySelector('.status');
+        const alertContainer = document.getElementById('alert-container');
+        const configForm = document.getElementById('config-form');
+        const testConnectionBtn = document.getElementById('test-connection');
+        const integrationUrl = document.getElementById('integration-url');
+        const copyUrlBtn = document.getElementById('copy-url');
+        
+        // Set the integration URL
+        integrationUrl.textContent = `${baseUrl}/mcp-events`;
+        
+        // Copy URL button
+        copyUrlBtn.addEventListener('click', () => {
+            navigator.clipboard.writeText(integrationUrl.textContent)
+                .then(() => {
+                    showAlert('URL copied to clipboard!', 'success');
+                    setTimeout(() => {
+                        clearAlerts();
+                    }, 3000);
+                })
+                .catch(err => {
+                    showAlert('Failed to copy URL: ' + err, 'error');
+                });
+        });
+        
+        // Connect to SSE
+        function connectSSE() {
+            // Close existing connection if any
+            if (eventSource) {
+                eventSource.close();
+            }
+            
+            // Create new EventSource
+            eventSource = new EventSource(`${baseUrl}/mcp-events`);
+            
+            // Connection opened
+            eventSource.addEventListener('connected', (event) => {
+                const data = JSON.parse(event.data);
+                clientId = data.clientId;
+                updateConnectionStatus('connected');
+                showAlert('Connected to MCP server!', 'success');
+                
+                // Load saved config if available
+                loadSavedConfig();
+            });
+            
+            // Error handling
+            eventSource.addEventListener('error', (event) => {
+                updateConnectionStatus('disconnected');
+                showAlert('Connection to MCP server lost. Attempting to reconnect...', 'error');
+                
+                // Try to reconnect after a short delay
+                setTimeout(connectSSE, 5000);
+            });
+            
+            // Handle heartbeat
+            eventSource.addEventListener('heartbeat', (event) => {
+                // Just update the status, no UI change needed
+                console.log('Heartbeat received:', JSON.parse(event.data));
+            });
+            
+            // Handle MCP responses
+            eventSource.addEventListener('mcp_response', (event) => {
+                const data = JSON.parse(event.data);
+                console.log('MCP response received:', data);
+                // Handle specific response types here if needed
+            });
+        }
+        
+        // Update connection status
+        function updateConnectionStatus(status) {
+            statusContainer.className = `status status-${status}`;
+            statusText.textContent = status === 'connected' ? 'Connected' : 'Disconnected';
+        }
+        
+        // Show alert message
+        function showAlert(message, type) {
+            const alert = document.createElement('div');
+            alert.className = `alert alert-${type}`;
+            alert.textContent = message;
+            alertContainer.appendChild(alert);
+        }
+        
+        // Clear all alerts
+        function clearAlerts() {
+            alertContainer.innerHTML = '';
+        }
+        
+        // Load saved configuration
+        function loadSavedConfig() {
+            // If we have a clientId, try to get the config
+            if (!clientId) return;
+            
+            fetch(`${baseUrl}/config/${clientId}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success && data.config) {
+                        // Fill form fields with saved config
+                        const config = data.config;
+                        
+                        // Jira
+                        document.getElementById('jira_host').value = config.jira.host || '';
+                        document.getElementById('jira_email').value = config.jira.email || '';
+                        document.getElementById('jira_api_token').value = config.jira.apiToken || '';
+                        document.getElementById('jira_cppf_project').value = config.jira.projects.cppf || '';
+                        document.getElementById('jira_cre_project').value = config.jira.projects.cre || '';
+                        
+                        // Confluence
+                        document.getElementById('confluence_host').value = config.confluence.host || '';
+                        document.getElementById('confluence_spaces').value = config.confluence.spaces.join(',') || '';
+                        document.getElementById('sprint_planning_space').value = config.confluence.sprintPlanningSpace || '';
+                        
+                        // User
+                        document.getElementById('user_account_id').value = config.user.accountId || '';
+                        document.getElementById('user_role').value = config.user.role || 'fullstack';
+                        document.getElementById('current_sprint').value = config.user.currentSprint || '';
+                        
+                        // Workflow
+                        document.getElementById('platforms').value = config.workflow.platforms.join(',') || '';
+                    }
+                })
+                .catch(error => {
+                    console.error('Error loading configuration:', error);
+                });
+        }
+        
+        // Save configuration
+        configForm.addEventListener('submit', (event) => {
+            event.preventDefault();
+            clearAlerts();
+            
+            // If not connected, show an error
+            if (!clientId) {
+                showAlert('Not connected to MCP server. Please refresh the page.', 'error');
+                return;
+            }
+            
+            // Get form data
+            const formData = new FormData(configForm);
+            const configData = Object.fromEntries(formData.entries());
+            
+            // Send to server
+            fetch(`${baseUrl}/config/${clientId}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(configData)
+            })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        showAlert('Configuration saved successfully!', 'success');
+                        
+                        // Check validation
+                        if (data.validation && !data.validation.isValid) {
+                            data.validation.errors.forEach(error => {
+                                showAlert(error, 'warning');
+                            });
+                        }
+                    } else {
+                        showAlert(`Failed to save configuration: ${data.error}`, 'error');
+                    }
+                })
+                .catch(error => {
+                    showAlert(`Error: ${error.message}`, 'error');
+                });
+        });
+        
+        // Test connection
+        testConnectionBtn.addEventListener('click', () => {
+            clearAlerts();
+            
+            // If not connected, show an error
+            if (!clientId) {
+                showAlert('Not connected to MCP server. Please refresh the page.', 'error');
+                return;
+            }
+            
+            // Get form data
+            const formData = new FormData(configForm);
+            const configData = Object.fromEntries(formData.entries());
+            
+            // First save the config
+            fetch(`${baseUrl}/config/${clientId}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(configData)
+            })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        // Now test the connection
+                        return fetch(`${baseUrl}/test-connection/${clientId}`, {
+                            method: 'POST'
+                        });
+                    } else {
+                        throw new Error(`Failed to save configuration: ${data.error}`);
+                    }
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        showAlert('Connection successful! Your Atlassian credentials are valid.', 'success');
+                    } else {
+                        showAlert(`Connection failed: ${data.error}`, 'error');
+                        if (data.details) {
+                            showAlert(JSON.stringify(data.details), 'error');
+                        }
+                    }
+                })
+                .catch(error => {
+                    showAlert(`Error: ${error.message}`, 'error');
+                });
+        });
+        
+        // Connect on page load
+        window.addEventListener('load', connectSSE);
+    </script>
+</body>
+</html>
