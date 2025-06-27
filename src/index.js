@@ -18,6 +18,7 @@ import refactoredSprintTools from './tools/refactored/sprint.js';
 import refactoredConfluenceSprintTools from './tools/refactored/confluenceSprint.js';
 import refactoredTicketHierarchyTools from './tools/refactored/ticketHierarchy.js';
 import refactoredCPPFTools from './tools/refactored/cppf.js';
+import prdContentTools from './tools/refactored/prdContent.js';
 
 // Continue to import original tools for backward compatibility
 // These would be phased out gradually
@@ -73,13 +74,14 @@ class AtlassianMCPServer {
     console.error('communicationTools:', communicationTools?.length || 'undefined');
     console.error('essentialCreTools:', essentialCreTools?.length || 'undefined');
     
-    // Collect all tools (Essential tools for internal team - 12 total)
+    // Collect all tools (Essential tools for internal team - 14 total)
     this.allTools = [
       ...(debugTools || []),                            // discover_custom_fields, test_jira_configuration
       ...(essentialRefactoredSprintTools || []),        // get_sprint_assignments, get_sprint_info
       ...(refactoredConfluenceSprintTools || []),       // get_sprint_planning  
       ...(essentialTicketHierarchyTools || []),         // get_ticket_info, get_ticket_hierarchy
       ...(essentialRefactoredCPPFTools || []),          // analyze_cppf
+      ...(prdContentTools || []),                       // get_prd_content, search_prd_content
       ...(essentialSprintDetectionTools || []),         // (none after filtering)
       ...(communicationTools || []),                    // add_progress_comment
       ...(essentialCreTools || []),                     // create_cre_story_from_cppf, create_cre_tasks_for_story, get_my_cre_stories, update_cre_task_status

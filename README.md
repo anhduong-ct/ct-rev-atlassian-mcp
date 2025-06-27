@@ -100,7 +100,7 @@ This MCP server provides AI assistants with direct access to Atlassian (Jira/Con
 
 That's it! Your AI assistant now has access to all Atlassian tools.
 
-## Available Tools (11 Total)
+## Available Tools (13 Total)
 
 ### Core Workflow Tools
 - `get_sprint_assignments` - Get filtered sprint assignments by user/status/platform
@@ -109,6 +109,8 @@ That's it! Your AI assistant now has access to all Atlassian tools.
 - `analyze_cppf` - Comprehensive CPPF analysis with role-specific requirements
 - `get_ticket_hierarchy` - Navigate ticket relationships (Task → Story → CPPF)
 - `get_ticket_info` - Complete ticket information with hierarchy
+- `get_prd_content` - Get raw PRD content from CPPF tickets for analysis
+- `search_prd_content` - Search for PRD content across Confluence spaces
 
 ### CRE Management Tools
 - `create_cre_story_from_cppf` - Create properly linked CRE stories
@@ -134,6 +136,11 @@ Ask your AI assistant natural language questions:
 - "Analyze CPPF-1234 for web development requirements"
 - "What's the complexity of CPPF-5678 for backend work?"
 - "Show me all documentation for CPPF-9012"
+
+### PRD Content Analysis
+- "Get PRD content for CPPF-1396"
+- "Show me the requirements document for CPPF-1234"
+- "Search for PRD documents related to promotion vouchers"
 
 ### CRE Workflow
 - "Create a CRE story for CPPF-1376" 
